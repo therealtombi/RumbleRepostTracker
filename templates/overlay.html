@@ -5,64 +5,61 @@
     <meta charset="UTF-8">
     <title>Rumble Overlay</title>
     <style>
-        body { margin: 0; padding: 20px; overflow: hidden; background: transparent; font-family: sans-serif; }
+        /* Base Reset */
+        body { margin: 0; padding: 10px; overflow: hidden; background: transparent; font-family: sans-serif; }
 
         #container {
+            width: 100%;
             display: flex;
             flex-direction: column;
-            width: 100%;
-            max-width: 600px;
-            /* Styling for the Alert Box */
-            background: rgba(20, 20, 20, 0.9);
-            border-radius: 12px;
-            padding: 20px;
-            box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.5);
-            border: 2px solid #85c742;
-
-            /* Animation State */
-            opacity: 0;
-            transform: translateY(20px) scale(0.95);
-            transition: all 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-        }
-
-        #container.visible {
-            opacity: 1;
-            transform: translateY(0) scale(1);
         }
 
         .header {
-            font-weight: 800;
+            font-weight: bold;
+            padding-bottom: 5px;
+            margin-bottom: 5px;
             text-transform: uppercase;
-            letter-spacing: 2px;
-            margin-bottom: 10px;
-            text-shadow: 2px 2px 4px rgba(0,0,0,0.5);
+            letter-spacing: 1px;
+            /* Smooth transition for config changes only */
+            transition: color 0.5s, font-size 0.5s; 
         }
 
-        .user-name {
-            font-size: 32px;
-            font-weight: bold;
-            margin-bottom: 5px;
+        .repost-item {
+            padding: 4px 0;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            /* Static opacity - NO PULSING */
+            opacity: 1; 
             text-shadow: 1px 1px 2px rgba(0,0,0,0.8);
         }
 
-        .video-title {
-            font-size: 18px;
-            font-style: italic;
-            opacity: 0.9;
+        /* Flash Animation Class */
+        .flash-active {
+            animation: flash 0.5s;
+        }
+
+        @keyframes flash {
+            0% { background-color: rgba(255,255,255,0); }
+            50% { background-color: rgba(255,255,255,0.8); }
+            100% { background-color: rgba(255,255,255,0); }
+        }
+
+        #error-msg {
+            color: red; font-weight: bold; display: none; font-size: 12px;
         }
     </style>
 </head>
 <body>
     <div id="container">
         <div id="header" class="header"></div>
-        <div id="content">
-            <div id="user" class="user-name"></div>
-            <div id="video" class="video-title"></div>
-        </div>
+        <div id="list"></div>
+        <div id="error-msg">Connecting to tracker...</div>
     </div>
 
     <script>
         let currentConfigStr = "";
+        let currentDataHash = "";
 
         function loadGoogleFont(fontName) {
             if (!fontName) return;
@@ -79,50 +76,83 @@
         }
 
         function update() {
+            // Timestamp prevents browser caching
             fetch('/api/data?t=' + new Date().getTime())
-                .then(r => r.json())
+                .then(r => {
+                    if (!r.ok) throw new Error("Not 200 OK");
+                    return r.json();
+                })
                 .then(resp => {
+                    document.getElementById('error-msg').style.display = 'none';
                     const data = resp.data;
                     const config = resp.config;
 
-                    const container = document.getElementById('container');
+                    const listDiv = document.getElementById('list');
                     const headerDiv = document.getElementById('header');
-                    const userDiv = document.getElementById('user');
-                    const videoDiv = document.getElementById('video');
+                    const container = document.getElementById('container');
 
-                    // 1. APPLY STYLES
+                    // 1. APPLY STYLES (Only if config changed)
                     const configStr = JSON.stringify(config);
                     if (configStr !== currentConfigStr) {
                         loadGoogleFont(config.font_family);
-
-                        container.style.textAlign = config.title_align;
-
                         headerDiv.innerText = config.title_text;
                         headerDiv.style.color = config.title_color;
                         headerDiv.style.fontSize = config.title_size + "px";
-
-                        userDiv.style.color = config.recent_color;
-                        videoDiv.style.color = config.older_color;
-
+                        headerDiv.style.textAlign = config.title_align;
                         currentConfigStr = configStr;
+                        // Force list redraw to apply new styles to items
+                        currentDataHash = "FORCE_REDRAW"; 
                     }
 
-                    // 2. SHOW / HIDE ANIMATION
-                    if (data.is_visible && data.current_alert) {
-                        // Update text only if changing to prevent jitter
-                        if (!container.classList.contains('visible') || userDiv.innerText !== data.current_alert.user) {
-                            userDiv.innerText = data.current_alert.user;
-                            videoDiv.innerText = data.current_alert.video;
+                    // 2. FLASH EFFECT
+                    if (data.flash) {
+                        container.classList.remove("flash-active");
+                        void container.offsetWidth; 
+                        container.classList.add("flash-active");
+                    }
+
+                    // 3. RENDER DATA
+                    const dataHash = JSON.stringify(data.reposts);
+
+                    if (dataHash !== currentDataHash) {
+                        currentDataHash = dataHash;
+
+                        if (!data.reposts || data.reposts.length === 0) {
+                            listDiv.innerHTML = "";
+                            return;
                         }
-                        container.classList.add('visible');
-                    } else {
-                        container.classList.remove('visible');
+
+                        let html = "";
+                        data.reposts.forEach((item, index) => {
+                            // index 0 is newest
+                            const color = (index === 0) ? config.recent_color : config.older_color;
+                            const weight = (index === 0) ? "bold" : "normal";
+
+                            html += `
+                                <div class="repost-item" style="
+                                    font-size: ${config.list_font_size}px; 
+                                    text-align: ${config.title_align};
+                                    color: ${config.older_color};
+                                ">
+                                    <span style="color: ${color}; font-weight: ${weight};">★ ${item.user}</span> 
+                                    reposted!
+                                </div>
+                            `;
+                        });
+                        listDiv.innerHTML = html;
                     }
                 })
-                .catch(e => console.log(e));
+                .catch(e => {
+                    // Connection lost (App closed), keep retrying silently
+                    console.log("Connection lost, retrying...", e);
+                    // Optional: Show disconnected status
+                    // document.getElementById('error-msg').style.display = 'block';
+                });
         }
 
-        setInterval(update, 500); 
+        // Poll every 1s
+        setInterval(update, 1000);
+        update(); // Run immediately
     </script>
 </body>
 </html>
