@@ -18,6 +18,7 @@ import queue
 import hashlib
 import webbrowser
 import logging
+import shutil
 
 # Web & Browser Libraries
 import undetected_chromedriver as uc
@@ -47,7 +48,10 @@ DEFAULT_CONFIG = {
     "title_text": "NEW REPOST",
     "title_color": "#ffffff",
     "title_size": 24,
-    "title_align": "center"
+    "title_align": "center",
+    "browser_path": "",
+    "selected_browser": "Auto-Detect",
+    "use_override": False
 }
 
 # --- GLOBAL SHARED STATE ---
@@ -56,7 +60,7 @@ GLOBAL_CONFIG = DEFAULT_CONFIG.copy()
 TRACKER_STATE = {
     "current_alert": None,
     "is_visible": False,
-    "audio_timestamp": 0,  # CHANGED: Using timestamp instead of boolean trigger
+    "audio_timestamp": 0,
     "last_update_id": 0
 }
 
@@ -90,7 +94,6 @@ def index():
 def current_sound():
     """Serves the user-selected audio file."""
     path = GLOBAL_CONFIG.get("sound_file", "")
-    # Ensure we serve the file with correct MIME type to satisfy browsers
     if path and os.path.exists(path):
         return send_file(path)
     return "No file selected", 404
@@ -98,8 +101,6 @@ def current_sound():
 
 @app.route('/api/data')
 def get_data():
-    # CHANGED: No longer resetting the trigger here.
-    # We send the state as-is, clients (OBS/Browser) decide if it's new.
     response = {
         "data": TRACKER_STATE,
         "config": GLOBAL_CONFIG
@@ -114,12 +115,57 @@ def run_flask_server():
         print(f"CRITICAL FLASK ERROR: {e}")
 
 
+# --- BROWSER DETECTION HELPERS ---
+def find_browsers():
+    """Scans common Windows paths for Chromium-based browsers."""
+    found = {"Auto-Detect": ""}
+
+    # Common Paths environment variables
+    prog_files = os.environ.get("PROGRAMFILES", "C:\\Program Files")
+    prog_files_x86 = os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")
+    local_app_data = os.environ.get("LOCALAPPDATA", "C:\\Users\\Default\\AppData\\Local")
+
+    # Dictionary of Browser Name -> Possible Relative Paths
+    # NOTE: Edge is intentionally commented out because it requires 'msedgedriver'
+    # which is not compatible with the built-in 'chromedriver' used by this tool.
+    candidates = {
+        "Google Chrome": [
+            os.path.join(prog_files, "Google\\Chrome\\Application\\chrome.exe"),
+            os.path.join(prog_files_x86, "Google\\Chrome\\Application\\chrome.exe")
+        ],
+        "Brave Browser": [
+            os.path.join(prog_files, "BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
+            os.path.join(prog_files_x86, "BraveSoftware\\Brave-Browser\\Application\\brave.exe"),
+            os.path.join(local_app_data, "BraveSoftware\\Brave-Browser\\Application\\brave.exe")
+        ],
+        "Vivaldi": [
+            os.path.join(local_app_data, "Vivaldi\\Application\\vivaldi.exe")
+        ],
+        "Opera": [
+            os.path.join(local_app_data, "Programs\\Opera\\launcher.exe"),
+            os.path.join(prog_files, "Opera\\launcher.exe")
+        ],
+        "Opera GX": [
+            os.path.join(local_app_data, "Programs\\Opera GX\\launcher.exe")
+        ]
+        # Edge Removed: Incompatible with uc.Chrome()
+    }
+
+    for name, paths in candidates.items():
+        for path in paths:
+            if os.path.exists(path):
+                found[name] = path
+                break
+
+    return found
+
+
 # --- MAIN GUI CLASS ---
 class RumbleRepostTracker:
     def __init__(self, root):
         self.root = root
-        self.root.title("Rumble Repost Tracker (Pro Audio Fixed)")
-        self.root.geometry("650x700")
+        self.root.title("Rumble Repost Tracker (Multi-Browser Support)")
+        self.root.geometry("650x850")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
         # Audio Init
@@ -133,7 +179,21 @@ class RumbleRepostTracker:
         self.seen_reposts = self.load_history()
         self.is_muted = tk.BooleanVar(value=False)
 
+        # Configuration Vars
         self.load_config_to_global()
+
+        # Browser Vars
+        self.detected_browsers = find_browsers()
+        self.browser_map = self.detected_browsers  # Name -> Path
+
+        # Set defaults if config is missing or invalid
+        if GLOBAL_CONFIG.get("selected_browser") not in self.browser_map:
+            GLOBAL_CONFIG["selected_browser"] = "Auto-Detect"
+
+        self.selected_browser_var = tk.StringVar(value=GLOBAL_CONFIG.get("selected_browser", "Auto-Detect"))
+        self.custom_browser_path_var = tk.StringVar(value=GLOBAL_CONFIG.get("browser_path", ""))
+        self.use_override_var = tk.BooleanVar(value=GLOBAL_CONFIG.get("use_override", False))
+
         self.write_template_file()
 
         self.flask_thread = threading.Thread(target=run_flask_server, daemon=True)
@@ -152,10 +212,20 @@ class RumbleRepostTracker:
 
         self.setup_ui()
         self.update_app_fonts()
+        self.update_browser_ui_state()  # Init state of browser inputs
 
         self.root.bind("<Control-MouseWheel>", self.on_ctrl_scroll)
         self.root.bind("<Control-Button-4>", lambda e: self.on_ctrl_scroll(e, 1))
         self.root.bind("<Control-Button-5>", lambda e: self.on_ctrl_scroll(e, -1))
+
+    # --- LOGGING ---
+    def log(self, msg):
+        """Thread-safe logging to the listbox and status bar."""
+        self.root.after(0, lambda: self._log_internal(msg))
+
+    def _log_internal(self, msg):
+        self.log_list.insert(0, f"[{time.strftime('%H:%M:%S')}] {msg}")
+        self.status_var.set(msg)
 
     # --- PERSISTENCE ---
     def load_config_to_global(self):
@@ -190,6 +260,11 @@ class RumbleRepostTracker:
         GLOBAL_CONFIG["title_align"] = self.title_align_var.get()
         GLOBAL_CONFIG["font_size"] = self.current_font_size
 
+        # Save Browser Config
+        GLOBAL_CONFIG["selected_browser"] = self.selected_browser_var.get()
+        GLOBAL_CONFIG["browser_path"] = self.custom_browser_path_var.get()
+        GLOBAL_CONFIG["use_override"] = self.use_override_var.get()
+
         with open(CONFIG_FILE, "w") as f:
             json.dump(GLOBAL_CONFIG, f)
 
@@ -197,7 +272,6 @@ class RumbleRepostTracker:
         self.status_var.set("Settings Saved & Applied!")
 
     def write_template_file(self):
-        # UPDATED HTML CONTENT WITH TIMESTAMP LOGIC
         html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -260,12 +334,11 @@ class RumbleRepostTracker:
     </div>
 
     <script>
-        // HARDCODED API URL for Local File Support
         const API_URL = "http://127.0.0.1:5050";
 
         let currentConfigStr = "";
         const audio = new Audio();
-        let lastPlayedAudioTime = 0; // TRACKS AUDIO PLAYBACK
+        let lastPlayedAudioTime = 0;
 
         function loadGoogleFont(fontName) {
             if (!fontName) return;
@@ -293,7 +366,6 @@ class RumbleRepostTracker:
                     const userDiv = document.getElementById('user');
                     const videoDiv = document.getElementById('video');
 
-                    // 1. UPDATE STYLES & AUDIO SOURCE
                     const configStr = JSON.stringify(config);
                     if (configStr !== currentConfigStr) {
                         loadGoogleFont(config.font_family);
@@ -304,17 +376,14 @@ class RumbleRepostTracker:
                         userDiv.style.color = config.recent_color;
                         videoDiv.style.color = config.older_color;
 
-                        // Set Audio Source
                         audio.src = API_URL + "/current_sound?t=" + new Date().getTime();
                         audio.load();
 
                         currentConfigStr = configStr;
                     }
 
-                    // 2. PLAY AUDIO (Updated Logic)
-                    // Check if server has a timestamp newer than what we last played
                     if (data.audio_timestamp > lastPlayedAudioTime) {
-                        lastPlayedAudioTime = data.audio_timestamp; // Update local tracker
+                        lastPlayedAudioTime = data.audio_timestamp;
                         audio.currentTime = 0;
                         var playPromise = audio.play();
                         if (playPromise !== undefined) {
@@ -324,7 +393,6 @@ class RumbleRepostTracker:
                         }
                     }
 
-                    // 3. SHOW / HIDE ALERT
                     if (data.is_visible && data.current_alert) {
                         if (!container.classList.contains('visible') || userDiv.innerText !== data.current_alert.user) {
                             userDiv.innerText = data.current_alert.user;
@@ -365,6 +433,228 @@ class RumbleRepostTracker:
         except:
             pass
 
+    def browse_sound(self):
+        f = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3")])
+        if f: self.sound_path_var.set(f)
+
+    # --- QUEUE PROCESSOR ---
+    def _queue_processor(self):
+        while True:
+            try:
+                alert_data = REPOST_QUEUE.get()
+
+                # 1. Update Visuals
+                TRACKER_STATE["current_alert"] = alert_data
+                TRACKER_STATE["is_visible"] = True
+
+                # 2. Handle Audio Logic
+                audio_path = GLOBAL_CONFIG.get("sound_file", "")
+                audio_duration = 0.0
+
+                if audio_path and os.path.exists(audio_path) and not self.is_muted.get():
+                    # TRIGGER OVERLAY AUDIO (Timestamp)
+                    TRACKER_STATE["audio_timestamp"] = time.time()
+
+                    # Get length
+                    try:
+                        sound = pygame.mixer.Sound(audio_path)
+                        audio_duration = sound.get_length()
+                    except:
+                        pass
+
+                # 3. Calculate Display Duration
+                # Rule: Minimum 10 seconds, OR length of audio if > 10s
+                display_time = max(10.0, audio_duration)
+
+                # Wait while overlay is visible
+                time.sleep(display_time)
+
+                # 4. Hide Alert
+                TRACKER_STATE["is_visible"] = False
+
+                # 5. Buffer
+                time.sleep(5.0)
+
+            except Exception as e:
+                print(f"Queue Error: {e}")
+                time.sleep(1)
+
+    def play_sound(self):
+        TRACKER_STATE["audio_timestamp"] = time.time()
+        f = self.sound_path_var.get()
+        if f and os.path.exists(f):
+            try:
+                pygame.mixer.Sound(f).play()
+            except:
+                pass
+
+    # --- BROWSER CONFIGURATION UI METHODS ---
+    def browse_browser_exe(self):
+        f = filedialog.askopenfilename(filetypes=[("Executables", "*.exe")])
+        if f:
+            self.custom_browser_path_var.set(f)
+
+    def update_browser_ui_state(self, *args):
+        """Enables/Disables dropdown based on override checkbox."""
+        if self.use_override_var.get():
+            self.cb_browser_select.state(['disabled'])
+            self.btn_browse_exe.config(state='normal')
+            self.entry_browser_path.config(state='normal')
+        else:
+            self.cb_browser_select.state(['!disabled'])
+            self.btn_browse_exe.config(state='disabled')
+            self.entry_browser_path.config(state='disabled')
+
+            # --- BROWSER LAUNCH LOGIC ---
+
+    def start_browser(self):
+        threading.Thread(target=self._init_browser, daemon=True).start()
+
+    def _init_browser(self):
+        self.log("Initializing Browser Driver...")
+
+        # Determine Path
+        binary_path = ""
+
+        if self.use_override_var.get():
+            binary_path = self.custom_browser_path_var.get()
+            if not binary_path or not os.path.exists(binary_path):
+                self.log("ERROR: Custom browser path invalid!")
+                return
+            self.log(f"Using Custom Browser: {os.path.basename(binary_path)}")
+        else:
+            selection = self.selected_browser_var.get()
+            if selection in self.browser_map and self.browser_map[selection]:
+                binary_path = self.browser_map[selection]
+                self.log(f"Using Detected Browser: {selection}")
+            elif selection == "Auto-Detect":
+                self.log("Using Default Auto-Detect (Chrome)...")
+                binary_path = ""  # Let UC find default
+            else:
+                self.log("Warning: Selection invalid, trying default.")
+
+        try:
+            opts = uc.ChromeOptions()
+            opts.add_argument("--mute-audio")
+
+            # If we found a specific path (Brave/Edge/Opera), set it
+            if binary_path:
+                opts.binary_location = binary_path
+
+            # Launch
+            self.driver = uc.Chrome(options=opts)
+            self.driver.get("https://rumble.com/login.php")
+            self.log("Browser Ready. Please Login.")
+            self.root.after(0, lambda: self.btn_track.config(state="normal"))
+        except Exception as e:
+            self.log(f"Browser Init Error: {e}")
+            if "unrecognized chrome version" in str(e).lower() or "session not created" in str(e).lower():
+                self.log("ERROR: Browser Incompatible.")
+                self.root.after(0, lambda: messagebox.showerror("Browser Error",
+                                                                "The selected browser (e.g. Edge) is not compatible with the driver.\n\nPlease use Google Chrome or Brave."))
+            elif "binary" in str(e).lower():
+                self.log("Tip: Try using the 'Override' option to manually find your browser .exe")
+
+    def toggle_tracking(self):
+        if not self.is_tracking:
+            self.is_tracking = True
+            self.btn_track.config(text="Stop Tracking", bg="#ff9999")
+
+            try:
+                self.driver.minimize_window()
+            except:
+                pass
+
+            threading.Thread(target=self._tracker_loop, daemon=True).start()
+        else:
+            self.is_tracking = False
+            self.btn_track.config(text="Start Tracking", bg="#90ee90")
+            self.log("Tracking Stopped.")
+
+    def _tracker_loop(self):
+        self.log(f"Tracking Active. Interval: {GLOBAL_CONFIG['poll_interval']}s")
+        while self.is_tracking:
+            # 1. Safety Check: If driver is gone, stop.
+            if not self.driver:
+                self.log("Browser driver missing. Stopping.")
+                self.root.after(0, self.toggle_tracking)
+                break
+
+            try:
+                self.driver.refresh()
+                time.sleep(3)
+
+                try:
+                    bell_btn = self.driver.find_element(By.CSS_SELECTOR, ".user-notifications--bell-button")
+                    self.driver.execute_script("arguments[0].click();", bell_btn)
+                    time.sleep(1.5)
+                except Exception as e:
+                    # Check for dead browser here
+                    if "invalid session id" in str(e).lower() or "no such window" in str(e).lower():
+                        raise e
+                    self.log("Notifications not found. Retrying...")
+                    time.sleep(5)
+                    continue
+
+                soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+                notif_list = soup.find("ul", class_="user-notifications--list")
+
+                if notif_list:
+                    items = notif_list.find_all("li")
+                    batch_reposts = []
+
+                    for li in items:
+                        text_div = li.find("div", class_="user-notifications--text")
+                        if not text_div: continue
+                        body_div = text_div.find("div", class_="user-notifications--body")
+                        if not body_div: continue
+
+                        full_text = body_div.get_text(" ", strip=True)
+
+                        if "reposted your video" in full_text:
+                            n_id = hashlib.md5(full_text.encode('utf-8')).hexdigest()
+
+                            if n_id not in self.seen_reposts:
+                                self.seen_reposts.add(n_id)
+                                self.save_history()
+
+                                user_link = body_div.find("a")
+                                user = user_link.text if user_link else "Unknown"
+
+                                vid_title = "Unknown"
+                                if '"' in full_text:
+                                    parts = full_text.split('"')
+                                    if len(parts) > 1: vid_title = parts[1]
+
+                                batch_reposts.append({"user": user, "video": vid_title})
+                                self.log(f"NEW REPOST QUEUED: {user}")
+
+                    for item in reversed(batch_reposts):
+                        REPOST_QUEUE.put(item)
+
+            except Exception as e:
+                # CRITICAL ERROR HANDLING
+                err_msg = str(e).lower()
+                if "invalid session id" in err_msg or "no such window" in err_msg or "target window already closed" in err_msg:
+                    self.log("Browser closed. Tracking stopped.")
+                    self.is_tracking = False
+                    self.root.after(0, lambda: self.btn_track.config(text="Start Tracking", bg="#90ee90"))
+                    self.driver = None
+                    break
+                else:
+                    print(f"Loop Error: {e}")
+
+            time.sleep(int(GLOBAL_CONFIG['poll_interval']))
+
+    def on_close(self):
+        self.is_tracking = False
+        try:
+            if self.driver: self.driver.quit()
+        except:
+            pass
+        self.root.destroy()
+        sys.exit(0)
+
     # --- UI SETUP ---
     def setup_ui(self):
         tabs = ttk.Notebook(self.root)
@@ -377,6 +667,36 @@ class RumbleRepostTracker:
         # === TAB 1: CONTROLS ===
         self.lbl_title = tk.Label(self.tab_main, text="Rumble Repost Tracker", font=("Arial", 16, "bold"))
         self.lbl_title.pack(pady=10)
+
+        # --- BROWSER SELECTION FRAME ---
+        browser_frame = tk.LabelFrame(self.tab_main, text="Browser Configuration", padx=10, pady=10)
+        browser_frame.pack(fill="x", padx=20, pady=5)
+
+        # Dropdown row
+        f_row1 = tk.Frame(browser_frame)
+        f_row1.pack(fill="x", pady=2)
+        tk.Label(f_row1, text="Browser In Use:").pack(side="left")
+
+        # Populate Combobox values from detected map
+        browser_names = list(self.browser_map.keys())
+        self.cb_browser_select = ttk.Combobox(f_row1, textvariable=self.selected_browser_var, values=browser_names,
+                                              state="readonly", width=25)
+        self.cb_browser_select.pack(side="left", padx=10)
+
+        # Override row
+        f_row2 = tk.Frame(browser_frame)
+        f_row2.pack(fill="x", pady=5)
+
+        chk_override = tk.Checkbutton(f_row2, text="Manual Override Path", variable=self.use_override_var,
+                                      command=self.update_browser_ui_state)
+        chk_override.pack(side="left")
+
+        self.entry_browser_path = tk.Entry(f_row2, textvariable=self.custom_browser_path_var)
+        self.entry_browser_path.pack(side="left", fill="x", expand=True, padx=5)
+
+        self.btn_browse_exe = tk.Button(f_row2, text="Browse...", command=self.browse_browser_exe, width=8)
+        self.btn_browse_exe.pack(side="left")
+        # --------------------------------
 
         self.btn_browser = tk.Button(self.tab_main, text="1. Open Browser & Login", command=self.start_browser,
                                      bg="#e0e0e0", height=2)
@@ -487,182 +807,6 @@ class RumbleRepostTracker:
             for c in w.winfo_children(): update_widget(c)
 
         update_widget(self.root)
-
-    # --- LOGIC ---
-    def log(self, msg):
-        self.root.after(0, lambda: self._log_internal(msg))
-
-    def _log_internal(self, msg):
-        self.log_list.insert(0, f"[{time.strftime('%H:%M:%S')}] {msg}")
-        self.status_var.set(msg)
-
-    def choose_color(self, config_key, btn_widget):
-        curr = GLOBAL_CONFIG.get(config_key, "#ffffff")
-        color = colorchooser.askcolor(color=curr, title=f"Choose Color")[1]
-        if color:
-            GLOBAL_CONFIG[config_key] = color
-            btn_widget.config(bg=color)
-            self.save_config()
-
-    def set_int_config(self, key, val):
-        try:
-            GLOBAL_CONFIG[key] = int(val)
-            self.save_config()
-        except:
-            pass
-
-    def browse_sound(self):
-        f = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3")])
-        if f: self.sound_path_var.set(f)
-
-    # --- QUEUE PROCESSOR ---
-    def _queue_processor(self):
-        while True:
-            try:
-                alert_data = REPOST_QUEUE.get()
-
-                # 1. Update Visuals
-                TRACKER_STATE["current_alert"] = alert_data
-                TRACKER_STATE["is_visible"] = True
-
-                # 2. Handle Audio
-                audio_path = GLOBAL_CONFIG.get("sound_file", "")
-                wait_time = 5.0
-
-                # Check for mute
-                if audio_path and os.path.exists(audio_path) and not self.is_muted.get():
-                    # TRIGGER OVERLAY AUDIO
-                    # CHANGED: Use timestamp to ensure OBS picks it up
-                    TRACKER_STATE["audio_timestamp"] = time.time()
-
-                    # Try to get duration for timing (Visuals match Audio)
-                    # If this fails, we fall back to 5s, but audio still triggers
-                    try:
-                        sound = pygame.mixer.Sound(audio_path)
-                        duration = sound.get_length()
-                        wait_time = min(duration, 15.0)
-                    except:
-                        pass
-
-                time.sleep(wait_time)
-                time.sleep(2.0)  # Buffer
-
-                TRACKER_STATE["is_visible"] = False
-                time.sleep(1.0)
-
-            except Exception as e:
-                print(f"Queue Error: {e}")
-                time.sleep(1)
-
-    def play_sound(self):
-        # 1. Trigger Overlay Audio
-        # CHANGED: Use timestamp
-        TRACKER_STATE["audio_timestamp"] = time.time()
-
-        # 2. Trigger Local Audio (For debugging)
-        f = self.sound_path_var.get()
-        if f and os.path.exists(f):
-            try:
-                pygame.mixer.Sound(f).play()
-            except:
-                pass
-
-    def start_browser(self):
-        threading.Thread(target=self._init_browser, daemon=True).start()
-
-    def _init_browser(self):
-        self.log("Opening Chrome...")
-        try:
-            opts = uc.ChromeOptions()
-            opts.add_argument("--mute-audio")
-            self.driver = uc.Chrome(options=opts)
-            self.driver.get("https://rumble.com/login.php")
-            self.log("Browser Ready. Please Login.")
-            self.root.after(0, lambda: self.btn_track.config(state="normal"))
-        except Exception as e:
-            self.log(f"Browser Error: {e}")
-
-    def toggle_tracking(self):
-        if not self.is_tracking:
-            self.is_tracking = True
-            self.btn_track.config(text="Stop Tracking", bg="#ff9999")
-
-            try:
-                self.driver.minimize_window()
-            except:
-                pass
-
-            threading.Thread(target=self._tracker_loop, daemon=True).start()
-        else:
-            self.is_tracking = False
-            self.btn_track.config(text="Start Tracking", bg="#90ee90")
-            self.log("Tracking Stopped.")
-
-    def _tracker_loop(self):
-        self.log(f"Tracking Active. Interval: {GLOBAL_CONFIG['poll_interval']}s")
-        while self.is_tracking:
-            try:
-                self.driver.refresh()
-                time.sleep(3)
-
-                try:
-                    bell_btn = self.driver.find_element(By.CSS_SELECTOR, ".user-notifications--bell-button")
-                    self.driver.execute_script("arguments[0].click();", bell_btn)
-                    time.sleep(1.5)
-                except:
-                    self.log("Notifications not found.")
-                    time.sleep(5)
-                    continue
-
-                soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-                notif_list = soup.find("ul", class_="user-notifications--list")
-
-                if notif_list:
-                    items = notif_list.find_all("li")
-                    batch_reposts = []
-
-                    for li in items:
-                        text_div = li.find("div", class_="user-notifications--text")
-                        if not text_div: continue
-                        body_div = text_div.find("div", class_="user-notifications--body")
-                        if not body_div: continue
-
-                        full_text = body_div.get_text(" ", strip=True)
-
-                        if "reposted your video" in full_text:
-                            n_id = hashlib.md5(full_text.encode('utf-8')).hexdigest()
-
-                            if n_id not in self.seen_reposts:
-                                self.seen_reposts.add(n_id)
-                                self.save_history()
-
-                                user_link = body_div.find("a")
-                                user = user_link.text if user_link else "Unknown"
-
-                                vid_title = "Unknown"
-                                if '"' in full_text:
-                                    parts = full_text.split('"')
-                                    if len(parts) > 1: vid_title = parts[1]
-
-                                batch_reposts.append({"user": user, "video": vid_title})
-                                self.log(f"NEW REPOST QUEUED: {user}")
-
-                    for item in reversed(batch_reposts):
-                        REPOST_QUEUE.put(item)
-
-            except Exception as e:
-                print(f"Loop Error: {e}")
-
-            time.sleep(int(GLOBAL_CONFIG['poll_interval']))
-
-    def on_close(self):
-        self.is_tracking = False
-        try:
-            if self.driver: self.driver.quit()
-        except:
-            pass
-        self.root.destroy()
-        sys.exit(0)
 
 
 if __name__ == "__main__":

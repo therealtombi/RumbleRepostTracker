@@ -60,12 +60,11 @@
     </div>
 
     <script>
-        // HARDCODED API URL for Local File Support
         const API_URL = "http://127.0.0.1:5050";
 
         let currentConfigStr = "";
         const audio = new Audio();
-        let lastPlayedAudioTime = 0; // TRACKS AUDIO PLAYBACK
+        let lastPlayedAudioTime = 0;
 
         function loadGoogleFont(fontName) {
             if (!fontName) return;
@@ -93,7 +92,6 @@
                     const userDiv = document.getElementById('user');
                     const videoDiv = document.getElementById('video');
 
-                    // 1. UPDATE STYLES & AUDIO SOURCE
                     const configStr = JSON.stringify(config);
                     if (configStr !== currentConfigStr) {
                         loadGoogleFont(config.font_family);
@@ -104,17 +102,14 @@
                         userDiv.style.color = config.recent_color;
                         videoDiv.style.color = config.older_color;
 
-                        // Set Audio Source
                         audio.src = API_URL + "/current_sound?t=" + new Date().getTime();
                         audio.load();
 
                         currentConfigStr = configStr;
                     }
 
-                    // 2. PLAY AUDIO (Updated Logic)
-                    // Check if server has a timestamp newer than what we last played
                     if (data.audio_timestamp > lastPlayedAudioTime) {
-                        lastPlayedAudioTime = data.audio_timestamp; // Update local tracker
+                        lastPlayedAudioTime = data.audio_timestamp;
                         audio.currentTime = 0;
                         var playPromise = audio.play();
                         if (playPromise !== undefined) {
@@ -124,7 +119,6 @@
                         }
                     }
 
-                    // 3. SHOW / HIDE ALERT
                     if (data.is_visible && data.current_alert) {
                         if (!container.classList.contains('visible') || userDiv.innerText !== data.current_alert.user) {
                             userDiv.innerText = data.current_alert.user;
