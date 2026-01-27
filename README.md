@@ -2,7 +2,7 @@
 
 A professional Python-based application for streamers that tracks reposts on your Rumble channel in real-time. It generates a customizable, animated overlay for OBS/Streamlabs and plays audio alerts when your content is reposted.
 
-## 🚀 Features (v3.0)
+## 🚀 Features (v2.1)
 
 * **Smart Session Capture:** Logs you in once via a visible browser window, captures your session cookies & user agent, and saves them securely. You don't need to log in every time you run the app.
 * **Hidden Background Tracking:** Runs a minimized, resource-optimized browser instance in the background to monitor notifications, ensuring Cloudflare checks are passed successfully.
