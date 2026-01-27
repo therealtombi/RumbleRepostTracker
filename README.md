@@ -18,31 +18,10 @@ A professional Python-based application for streamers that tracks reposts on you
 
 * **OS:** Windows 10/11
 * **Browser:** A Chromium-based browser must be installed (Google Chrome, Brave, Edge, Opera, or Vivaldi).
-* **Python:** 3.10 or newer (if running from source).
 
 ## 📦 Installation
-
-### Option A: Running from Source
-
-1.  **Clone the repository:**
-    ```bash
-    git clone [https://github.com/yourusername/rumble-repost-tracker.git](https://github.com/yourusername/rumble-repost-tracker.git)
-    cd rumble-repost-tracker
-    ```
-
-2.  **Install dependencies:**
-    ```bash
-    pip install -r requirements.txt
-    ```
-    *Key dependencies: `customtkinter`, `undetected-chromedriver`, `flask`, `pygame`, `beautifulsoup4`, `requests`.*
-
-3.  **Run the application:**
-    ```bash
-    python rumble_tracker.py
-    ```
-
-### Option B: Standalone Executable
-If you have built the `.exe` using PyInstaller, simply double-click `RumbleRepostTracker.exe`. No Python installation is required.
+### Standalone Executable
+Download the `.exe` build using PyInstaller from the bottom of the release pages then, simply double-click `RumbleRepostTracker.exe`. No Python installation is required.
 
 ## ▶️ How to Use
 
