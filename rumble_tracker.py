@@ -1017,9 +1017,13 @@ class RumbleRepostTracker(ctk.CTk):
         ctk.CTkLabel(frame_obs, text="OBS Setup (Recommended)", font=ctk.CTkFont(weight="bold")).pack(anchor="w",
                                                                                                       padx=10,
                                                                                                       pady=(5, 0))
-        ctk.CTkLabel(frame_obs, text="1. In OBS, Add Source -> Browser").pack(anchor="w", padx=10)
-        ctk.CTkLabel(frame_obs, text="2. Check 'Local file'").pack(anchor="w", padx=10)
-        ctk.CTkLabel(frame_obs, text="3. Select 'overlay.html' from the app folder").pack(anchor="w", padx=10,
+        ctk.CTkLabel(frame_obs, text="1. In OBS, Add Source -> Browser").pack(anchor="w", padx=10,
+                                                                                          pady=(0, 5))
+        ctk.CTkLabel(frame_obs, text="2. Click 'Copy URL' and replace the URL in the OBS Browser Source").pack(anchor="w", padx=10,
+                                                                                          pady=(0, 5))
+        ctk.CTkLabel(frame_obs, text="3. Check 'Control audio via OBS'").pack(anchor="w", padx=10,
+                                                                                          pady=(0, 5))
+        ctk.CTkLabel(frame_obs, text="4. Do not enable 'Refresh browser when scene becomes active'").pack(anchor="w", padx=10,
                                                                                           pady=(0, 5))
 
         frame_link = ctk.CTkFrame(tab_main)
