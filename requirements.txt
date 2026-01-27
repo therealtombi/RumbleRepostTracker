@@ -4,3 +4,4 @@ pillow
 pygame
 setuptools
 flask
+customtkinter

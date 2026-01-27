@@ -9,38 +9,58 @@ except ImportError:
     import distutils.version
 # --------------------------------------------
 
+import customtkinter as ctk
 import tkinter as tk
-from tkinter import ttk, filedialog, colorchooser, messagebox
+from tkinter import filedialog, colorchooser, messagebox
 import threading
 import time
 import json
 import queue
 import hashlib
-import webbrowser
 import logging
 import shutil
+import requests
+import subprocess  # NEW: Required for launching App Mode
 
 # Web & Browser Libraries
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
 from bs4 import BeautifulSoup
 import pygame
-from flask import Flask, render_template, jsonify, send_file
+from flask import Flask, jsonify, send_file
 
 # --- LOGGING SETUP ---
 log = logging.getLogger('werkzeug')
 log.setLevel(logging.ERROR)
 
+# --- CTK CONFIGURATION ---
+ctk.set_appearance_mode("Dark")
+ctk.set_default_color_theme("green")
+
 # --- GLOBAL CONFIGURATION ---
 CONFIG_FILE = "tracker_config.json"
 HISTORY_FILE = "repost_history.json"
+COOKIES_FILE = "saved_cookies.json"
 TEMPLATE_FILE = "overlay.html"
+ICON_FILE = "icon.ico"
+
+GOOGLE_FONTS = [
+    "Roboto", "Open Sans", "Lato", "Montserrat", "Oswald", "Source Sans Pro",
+    "Slabo 27px", "Raleway", "PT Sans", "Merriweather", "Noto Sans", "Nunito",
+    "Concert One", "Prompt", "Work Sans", "Rubik", "Fjalla One", "Bangers",
+    "Poiret One", "Righteous", "Russo One", "Handlee", "Patrick Hand",
+    "Creepster", "Anton", "Orbitron", "Luckiest Guy", "Fredoka One",
+    "Special Elite", "Teko", "Alfa Slab One", "Audiowide", "Black Ops One",
+    "Carter One", "Changa One", "Passion One", "Press Start 2P", "Quantico",
+    "Sigmar One", "Squada One", "Syncopate", "Titan One", "Ultra",
+    "VT323", "Voltaire", "Wallpoet", "Yeon Sung", "Zilla Slab Highlight"
+]
 
 DEFAULT_CONFIG = {
     "sound_file": "",
     "poll_interval": 5,
     "overlay_port": 5050,
-    "font_size": 10,
+    "font_size": 14,
     "repost_limit": 5,
     "font_family": "Roboto",
     "recent_color": "#85c742",
@@ -51,7 +71,8 @@ DEFAULT_CONFIG = {
     "title_align": "center",
     "browser_path": "",
     "selected_browser": "Auto-Detect",
-    "use_override": False
+    "use_override": False,
+    "remember_login": True
 }
 
 # --- GLOBAL SHARED STATE ---
@@ -64,7 +85,6 @@ TRACKER_STATE = {
     "last_update_id": 0
 }
 
-# Queue for holding incoming reposts
 REPOST_QUEUE = queue.Queue()
 
 # --- FLASK WEB SERVER ---
@@ -92,7 +112,6 @@ def index():
 
 @app.route('/current_sound')
 def current_sound():
-    """Serves the user-selected audio file."""
     path = GLOBAL_CONFIG.get("sound_file", "")
     if path and os.path.exists(path):
         return send_file(path)
@@ -117,17 +136,12 @@ def run_flask_server():
 
 # --- BROWSER DETECTION HELPERS ---
 def find_browsers():
-    """Scans common Windows paths for Chromium-based browsers."""
     found = {"Auto-Detect": ""}
 
-    # Common Paths environment variables
     prog_files = os.environ.get("PROGRAMFILES", "C:\\Program Files")
     prog_files_x86 = os.environ.get("PROGRAMFILES(X86)", "C:\\Program Files (x86)")
     local_app_data = os.environ.get("LOCALAPPDATA", "C:\\Users\\Default\\AppData\\Local")
 
-    # Dictionary of Browser Name -> Possible Relative Paths
-    # NOTE: Edge is intentionally commented out because it requires 'msedgedriver'
-    # which is not compatible with the built-in 'chromedriver' used by this tool.
     candidates = {
         "Google Chrome": [
             os.path.join(prog_files, "Google\\Chrome\\Application\\chrome.exe"),
@@ -148,7 +162,6 @@ def find_browsers():
         "Opera GX": [
             os.path.join(local_app_data, "Programs\\Opera GX\\launcher.exe")
         ]
-        # Edge Removed: Incompatible with uc.Chrome()
     }
 
     for name, paths in candidates.items():
@@ -161,12 +174,17 @@ def find_browsers():
 
 
 # --- MAIN GUI CLASS ---
-class RumbleRepostTracker:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Rumble Repost Tracker (Multi-Browser Support)")
-        self.root.geometry("650x850")
-        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+class RumbleRepostTracker(ctk.CTk):
+    def __init__(self):
+        super().__init__()
+        self.title("Rumble Repost Tracker (Pro)")
+        self.geometry("1920x1080")
+
+        if os.path.exists(ICON_FILE):
+            try:
+                self.iconbitmap(ICON_FILE)
+            except:
+                pass
 
         # Audio Init
         try:
@@ -176,23 +194,29 @@ class RumbleRepostTracker:
 
         self.driver = None
         self.is_tracking = False
+        self.is_logging_in = False
         self.seen_reposts = self.load_history()
         self.is_muted = tk.BooleanVar(value=False)
+        self.test_sound_channel = None
+        self.fade_timer = None
+        self.test_overlay_timer = None
+
+        self.login_btn_default_color = ["#3B8ED0", "#1F6AA5"]
 
         # Configuration Vars
         self.load_config_to_global()
 
         # Browser Vars
         self.detected_browsers = find_browsers()
-        self.browser_map = self.detected_browsers  # Name -> Path
+        self.browser_map = self.detected_browsers
 
-        # Set defaults if config is missing or invalid
         if GLOBAL_CONFIG.get("selected_browser") not in self.browser_map:
             GLOBAL_CONFIG["selected_browser"] = "Auto-Detect"
 
         self.selected_browser_var = tk.StringVar(value=GLOBAL_CONFIG.get("selected_browser", "Auto-Detect"))
         self.custom_browser_path_var = tk.StringVar(value=GLOBAL_CONFIG.get("browser_path", ""))
         self.use_override_var = tk.BooleanVar(value=GLOBAL_CONFIG.get("use_override", False))
+        self.remember_login_var = tk.BooleanVar(value=GLOBAL_CONFIG.get("remember_login", True))
 
         self.write_template_file()
 
@@ -208,24 +232,32 @@ class RumbleRepostTracker:
         self.title_text_var = tk.StringVar(value=GLOBAL_CONFIG.get("title_text", "NEW REPOST"))
         self.title_align_var = tk.StringVar(value=GLOBAL_CONFIG.get("title_align", "center"))
 
-        self.current_font_size = GLOBAL_CONFIG.get("font_size", 10)
+        self.current_font_size = GLOBAL_CONFIG.get("font_size", 14)
 
         self.setup_ui()
-        self.update_app_fonts()
-        self.update_browser_ui_state()  # Init state of browser inputs
 
-        self.root.bind("<Control-MouseWheel>", self.on_ctrl_scroll)
-        self.root.bind("<Control-Button-4>", lambda e: self.on_ctrl_scroll(e, 1))
-        self.root.bind("<Control-Button-5>", lambda e: self.on_ctrl_scroll(e, -1))
+        # Setup Triggers for Live Preview
+        self.title_text_var.trace_add("write", self.update_live_preview)
+        self.font_family_var.trace_add("write", self.update_live_preview)
+        self.title_align_var.trace_add("write", self.update_live_preview)
 
-    # --- LOGGING ---
+        self.bind("<Control-MouseWheel>", self.on_ctrl_scroll)
+        self.update_browser_ui_state()
+
+        # --- STARTUP COOKIE CHECK ---
+        self.after(1000, self.check_cookie_status)
+
+        # Initial Preview Render
+        self.update_live_preview()
+
     def log(self, msg):
-        """Thread-safe logging to the listbox and status bar."""
-        self.root.after(0, lambda: self._log_internal(msg))
+        self.after(0, lambda: self._log_internal(msg))
 
     def _log_internal(self, msg):
-        self.log_list.insert(0, f"[{time.strftime('%H:%M:%S')}] {msg}")
-        self.status_var.set(msg)
+        self.log_textbox.configure(state="normal")
+        self.log_textbox.insert("0.0", f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+        self.log_textbox.configure(state="disabled")
+        self.status_label.configure(text=msg)
 
     # --- PERSISTENCE ---
     def load_config_to_global(self):
@@ -260,10 +292,10 @@ class RumbleRepostTracker:
         GLOBAL_CONFIG["title_align"] = self.title_align_var.get()
         GLOBAL_CONFIG["font_size"] = self.current_font_size
 
-        # Save Browser Config
         GLOBAL_CONFIG["selected_browser"] = self.selected_browser_var.get()
         GLOBAL_CONFIG["browser_path"] = self.custom_browser_path_var.get()
         GLOBAL_CONFIG["use_override"] = self.use_override_var.get()
+        GLOBAL_CONFIG["remember_login"] = self.remember_login_var.get()
 
         with open(CONFIG_FILE, "w") as f:
             json.dump(GLOBAL_CONFIG, f)
@@ -271,7 +303,484 @@ class RumbleRepostTracker:
         TRACKER_STATE["last_update_id"] += 1
         self.status_var.set("Settings Saved & Applied!")
 
+    def save_cookies(self):
+        if self.driver:
+            try:
+                cookies = self.driver.get_cookies()
+                ua = self.driver.execute_script("return navigator.userAgent")
+
+                with open(COOKIES_FILE, "w") as f:
+                    json.dump({"cookies": cookies, "user_agent": ua}, f)
+                self.log("Session saved (Cookies + UA).")
+            except Exception as e:
+                print(f"Failed to save cookies: {e}")
+
+    def load_saved_session(self):
+        if os.path.exists(COOKIES_FILE):
+            try:
+                with open(COOKIES_FILE, "r") as f:
+                    return json.load(f)
+            except:
+                pass
+        return None
+
+    def validate_cookie_expiry(self, session_data):
+        if not session_data or "cookies" not in session_data: return False
+        cookies = session_data["cookies"]
+        current_time = time.time()
+        for cookie in cookies:
+            if 'expiry' in cookie:
+                if cookie['expiry'] < current_time:
+                    return False
+        return True
+
+    def check_cookie_status(self):
+        if not self.remember_login_var.get():
+            return
+
+        session = self.load_saved_session()
+        if not session:
+            self.log("No saved login found. Please log in.")
+            return
+
+        if self.validate_cookie_expiry(session):
+            self.log("Valid saved session found. Ready to track.")
+            self.btn_track.configure(state="normal", fg_color="#2CC985")
+            self.btn_browser.configure(text="LOGGED IN (Click to Reset)", fg_color="#2CC985", hover_color="#22AA66")
+        else:
+            self.log("Saved login expired.")
+            self.btn_browser.configure(text="1. Login & Capture", fg_color=self.login_btn_default_color[0],
+                                       hover_color=self.login_btn_default_color[1])
+            try:
+                os.remove(COOKIES_FILE)
+            except:
+                pass
+
+    # --- UI HELPERS ---
+    def choose_color(self, config_key, btn_widget):
+        curr = GLOBAL_CONFIG.get(config_key, "#ffffff")
+        color = colorchooser.askcolor(color=curr, title=f"Choose Color")[1]
+        if color:
+            GLOBAL_CONFIG[config_key] = color
+            btn_widget.configure(fg_color=color, text=color)
+            self.save_config()
+            self.update_live_preview()
+
+    def set_int_config(self, key, val):
+        try:
+            GLOBAL_CONFIG[key] = int(val)
+            self.save_config()
+            self.update_live_preview()
+        except:
+            pass
+
+    def browse_sound(self):
+        f = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3")])
+        if f: self.sound_path_var.set(f)
+
+    def toggle_mute(self):
+        new_state = not self.is_muted.get()
+        self.is_muted.set(new_state)
+        if new_state:
+            self.btn_mute.configure(text="AUDIO MUTED (Click to Enable)", fg_color="#FF5555", hover_color="#AA0000")
+        else:
+            self.btn_mute.configure(text="MUTE AUDIO ALERTS", fg_color="#555555", hover_color="#777777")
+
+    def _queue_processor(self):
+        while True:
+            try:
+                alert_data = REPOST_QUEUE.get()
+                TRACKER_STATE["current_alert"] = alert_data
+                TRACKER_STATE["is_visible"] = True
+
+                audio_path = GLOBAL_CONFIG.get("sound_file", "")
+                audio_duration = 0.0
+
+                if audio_path and os.path.exists(audio_path) and not self.is_muted.get():
+                    TRACKER_STATE["audio_timestamp"] = time.time()
+                    try:
+                        sound = pygame.mixer.Sound(audio_path)
+                        audio_duration = sound.get_length()
+                    except:
+                        pass
+
+                display_time = max(10.0, audio_duration)
+                time.sleep(display_time)
+
+                TRACKER_STATE["is_visible"] = False
+                time.sleep(5.0)
+
+            except Exception as e:
+                print(f"Queue Error: {e}")
+                time.sleep(1)
+
+    def play_sound(self):
+        self.stop_test_sound()
+        TRACKER_STATE["audio_timestamp"] = time.time()
+        TRACKER_STATE["current_alert"] = {"user": "TEST USER", "video": "Test Video Title"}
+        TRACKER_STATE["is_visible"] = True
+
+        f = self.sound_path_var.get()
+        duration = 10.0
+
+        if f and os.path.exists(f):
+            try:
+                sound = pygame.mixer.Sound(f)
+                self.test_sound_channel = sound.play()
+                file_len = sound.get_length()
+                if file_len > 20:
+                    self.fade_timer = self.after(18000, lambda: self.test_sound_channel.fadeout(2000))
+                    duration = 20.0
+                else:
+                    duration = max(10.0, file_len)
+            except:
+                pass
+
+        self.test_overlay_timer = self.after(int(duration * 1000), self.stop_test_overlay)
+
+    def stop_test_overlay(self):
+        TRACKER_STATE["is_visible"] = False
+        if self.test_overlay_timer:
+            self.after_cancel(self.test_overlay_timer)
+            self.test_overlay_timer = None
+
+    def stop_test_sound(self):
+        if self.fade_timer:
+            self.after_cancel(self.fade_timer)
+            self.fade_timer = None
+        if self.test_sound_channel:
+            self.test_sound_channel.stop()
+            self.test_sound_channel = None
+        else:
+            pygame.mixer.stop()
+        self.stop_test_overlay()
+
+    def browse_browser_exe(self):
+        f = filedialog.askopenfilename(filetypes=[("Executables", "*.exe")])
+        if f: self.custom_browser_path_var.set(f)
+
+    def update_browser_ui_state(self, *args):
+        if self.use_override_var.get():
+            self.cb_browser_select.configure(state="disabled")
+            self.btn_browse_exe.configure(state="normal")
+            self.entry_browser_path.configure(state="normal")
+        else:
+            self.cb_browser_select.configure(state="normal")
+            self.btn_browse_exe.configure(state="disabled")
+            self.entry_browser_path.configure(state="disabled")
+
+    # --- BROWSER LAUNCH LOGIC ---
+    def get_browser_options(self, binary_path=""):
+        opts = uc.ChromeOptions()
+        opts.add_argument("--mute-audio")
+        opts.add_argument("--disable-gpu")
+
+        if not binary_path:
+            if self.use_override_var.get():
+                binary_path = self.custom_browser_path_var.get()
+            else:
+                selection = self.selected_browser_var.get()
+                if selection in self.browser_map and self.browser_map[selection]:
+                    binary_path = self.browser_map[selection]
+
+        if binary_path:
+            opts.binary_location = binary_path
+
+        return opts
+
+    def start_login_process(self):
+        if self.btn_browser.cget("text").startswith("LOGGED IN"):
+            if messagebox.askyesno("Reset Login", "Do you want to clear your saved session and log in again?"):
+                try:
+                    os.remove(COOKIES_FILE)
+                except:
+                    pass
+                self.btn_browser.configure(text="1. Login & Capture", fg_color=self.login_btn_default_color[0],
+                                           hover_color=self.login_btn_default_color[1])
+                self.btn_track.configure(state="disabled", fg_color="gray")
+                self.log("Session cleared.")
+            return
+
+        if self.is_logging_in or self.is_tracking: return
+        self.is_logging_in = True
+        self.btn_browser.configure(state="disabled", text="Waiting for Login...")
+        threading.Thread(target=self._run_login_monitor, daemon=True).start()
+
+    def _run_login_monitor(self):
+        self.log("Opening Browser for Login...")
+        opts = self.get_browser_options()
+
+        try:
+            self.driver = uc.Chrome(options=opts)
+            self.driver.get("https://rumble.com/login.php")
+            self.log("Please log in manually.")
+
+            while self.is_logging_in:
+                if not self.driver: break
+                try:
+                    bell = self.driver.find_elements(By.CSS_SELECTOR, ".user-notifications--bell-button")
+                    if bell:
+                        self.log("Login Detected! Saving session...")
+                        self.save_cookies()
+                        time.sleep(1)
+                        self.driver.quit()
+                        self.driver = None
+                        self.log("Login successful. Window closed.")
+                        self.after(0, lambda: self.btn_track.configure(state="normal", fg_color="#2CC985"))
+                        self.after(0,
+                                   lambda: self.btn_browser.configure(state="normal", text="LOGGED IN (Click to Reset)",
+                                                                      fg_color="#2CC985", hover_color="#22AA66"))
+                        break
+                except:
+                    pass
+                time.sleep(1)
+
+        except Exception as e:
+            self.log(f"Login Init Error: {e}")
+            self.driver = None
+            self.after(0, lambda: self.btn_browser.configure(state="normal", text="1. Login & Capture"))
+
+        self.is_logging_in = False
+
+    def toggle_tracking(self):
+        if not self.is_tracking:
+            self.is_tracking = True
+            self.btn_track.configure(text="Stop Tracking", fg_color="#FF5555", hover_color="#AA0000")
+            threading.Thread(target=self._tracker_loop_fetch, daemon=True).start()
+        else:
+            self.is_tracking = False
+            self.btn_track.configure(text="Start Tracking", fg_color="#2CC985", hover_color="#22AA66")
+            self.log("Tracking Stopped.")
+
+    def _tracker_loop_fetch(self):
+        self.log("Starting API Tracker (Fetch Mode)...")
+
+        session_data = self.load_saved_session()
+        if not session_data or "cookies" not in session_data:
+            self.log("No valid session found. Please Login.")
+            self.after(0, self.toggle_tracking)
+            return
+
+        s = requests.Session()
+        for c in session_data["cookies"]:
+            s.cookies.set(c['name'], c['value'], domain=c['domain'])
+
+        headers = {
+            "User-Agent": session_data.get("user_agent",
+                                           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"),
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://rumble.com/",
+        }
+
+        api_url = "https://rumble.com/service.php?name=user.notification_feed&limit=25"
+
+        self.log(f"Tracking Active. Interval: {GLOBAL_CONFIG['poll_interval']}s")
+
+        while self.is_tracking:
+            try:
+                r = s.get(api_url, headers=headers)
+
+                if r.status_code == 200:
+                    data = r.json()
+
+                    if "data" in data and "items" in data["data"]:
+                        items = data["data"]["items"]
+                        batch_reposts = []
+
+                        for item in items:
+                            is_repost = False
+                            user_name = "Unknown"
+                            video_title = "Video"
+
+                            if item.get("type") == "video_reposted":
+                                is_repost = True
+                                user_obj = item.get("user", {})
+                                video_obj = item.get("video", {})
+                                user_name = user_obj.get("username", user_obj.get("name", "Unknown"))
+                                video_title = video_obj.get("title", "Unknown Video")
+
+                            elif "reposted" in item.get("body", "").lower():
+                                is_repost = True
+                                if "user" in item:
+                                    user_name = item["user"].get("username", "Unknown")
+
+                            if is_repost:
+                                unique_str = f"{user_name}_{video_title}_{item.get('created_on', '')}"
+                                n_id = hashlib.md5(unique_str.encode('utf-8')).hexdigest()
+
+                                if n_id not in self.seen_reposts:
+                                    self.seen_reposts.add(n_id)
+                                    self.save_history()
+
+                                    batch_reposts.append({"user": user_name, "video": video_title})
+                                    self.log(f"NEW REPOST: {user_name}")
+
+                        for item in reversed(batch_reposts):
+                            REPOST_QUEUE.put(item)
+
+                elif r.status_code == 403:
+                    self.log("Session Blocked (403). Switching to Browser Mode...")
+                    self.is_tracking = False
+                    self.driver = None
+                    threading.Thread(target=self._tracker_loop, daemon=True).start()
+                    break
+                else:
+                    self.log(f"API Error: {r.status_code}")
+
+            except Exception as e:
+                self.log(f"Fetch Error: {e}")
+
+            time.sleep(int(GLOBAL_CONFIG['poll_interval']))
+
+    def _tracker_loop(self):
+        # Fallback Selenium loop
+        self.log("Starting Browser Tracker (Hidden)...")
+        self.is_tracking = True
+
+        session_data = self.load_saved_session()
+
+        try:
+            opts = self.get_browser_options()
+            self.driver = uc.Chrome(options=opts)
+            self.driver.minimize_window()
+
+            if session_data:
+                self.driver.get("https://rumble.com/404")
+                for c in session_data["cookies"]:
+                    try:
+                        self.driver.add_cookie(c)
+                    except:
+                        pass
+                self.driver.get("https://rumble.com")
+        except Exception as e:
+            self.log(f"Fallback Error: {e}")
+            self.is_tracking = False
+            return
+
+        while self.is_tracking:
+            if not self.driver: break
+            try:
+                self.driver.refresh()
+                time.sleep(3)
+                bell = self.driver.find_element(By.CSS_SELECTOR, ".user-notifications--bell-button")
+                self.driver.execute_script("arguments[0].click();", bell)
+                time.sleep(1.5)
+
+                soup = BeautifulSoup(self.driver.page_source, 'html.parser')
+                notif_list = soup.find("ul", class_="user-notifications--list")
+                if notif_list:
+                    items = notif_list.find_all("li")
+                    batch_reposts = []
+                    for li in items:
+                        text_div = li.find("div", class_="user-notifications--text")
+                        if not text_div: continue
+                        body_div = text_div.find("div", class_="user-notifications--body")
+                        if not body_div: continue
+                        full_text = body_div.get_text(" ", strip=True)
+                        if "reposted your video" in full_text:
+                            n_id = hashlib.md5(full_text.encode('utf-8')).hexdigest()
+                            if n_id not in self.seen_reposts:
+                                self.seen_reposts.add(n_id)
+                                self.save_history()
+                                user_link = body_div.find("a")
+                                user = user_link.text if user_link else "Unknown"
+                                vid_title = "Unknown"
+                                if '"' in full_text:
+                                    parts = full_text.split('"')
+                                    if len(parts) > 1: vid_title = parts[1]
+                                batch_reposts.append({"user": user, "video": vid_title})
+                                self.log(f"NEW REPOST: {user}")
+                    for item in reversed(batch_reposts):
+                        REPOST_QUEUE.put(item)
+            except Exception as e:
+                if "invalid session id" in str(e).lower(): break
+            time.sleep(int(GLOBAL_CONFIG['poll_interval']))
+
+        if self.driver:
+            try:
+                self.driver.quit()
+            except:
+                pass
+            self.driver = None
+
+    def on_close(self):
+        self.is_tracking = False
+        try:
+            if self.driver: self.driver.quit()
+        except:
+            pass
+        self.destroy()
+        sys.exit(0)
+
+    # --- SCALING ---
+    def on_ctrl_scroll(self, event, manual_delta=None):
+        delta = manual_delta if manual_delta else event.delta
+        if delta > 0:
+            self.current_font_size += 1
+        else:
+            self.current_font_size -= 1
+        self.current_font_size = max(8, min(self.current_font_size, 30))
+        self.lbl_title.configure(font=ctk.CTkFont(family="Arial", size=self.current_font_size + 6, weight="bold"))
+
+    def update_app_fonts(self):
+        pass
+
+        # --- LIVE PREVIEW UPDATE LOGIC ---
+
+    def update_live_preview(self, *args):
+        self.lbl_prev_header.configure(text=self.title_text_var.get())
+
+        fam = self.font_family_var.get()
+        if not fam: fam = "Roboto"
+
+        title_size = int(GLOBAL_CONFIG.get('title_size', 24))
+
+        self.lbl_prev_header.configure(font=(fam, title_size, "bold"))
+        self.lbl_prev_user.configure(font=(fam, 32, "bold"))
+        self.lbl_prev_video.configure(font=(fam, 18, "italic"))
+
+        self.lbl_prev_header.configure(text_color=GLOBAL_CONFIG.get('title_color', '#ffffff'))
+        self.lbl_prev_user.configure(text_color=GLOBAL_CONFIG.get('recent_color', '#85c742'))
+        self.lbl_prev_video.configure(text_color=GLOBAL_CONFIG.get('older_color', '#ffffff'))
+
+        align_map = {"left": "w", "center": "center", "right": "e"}
+        alignment = align_map.get(self.title_align_var.get(), "center")
+
+        self.lbl_prev_header.configure(anchor=alignment)
+        self.lbl_prev_user.configure(anchor=alignment)
+        self.lbl_prev_video.configure(anchor=alignment)
+
+    # --- NEW: LAUNCH WEB PREVIEW POPUP ---
+    def launch_web_preview(self):
+        """Launches the overlay in a chrome 'app' window for perfect font rendering"""
+        url = "http://127.0.0.1:5050"
+
+        # 1. Attempt to find a binary to use
+        binary = None
+        if self.use_override_var.get():
+            binary = self.custom_browser_path_var.get()
+        else:
+            selection = self.selected_browser_var.get()
+            if selection in self.browser_map:
+                binary = self.browser_map[selection]
+
+        # 2. Launch
+        if binary and os.path.exists(binary):
+            try:
+                # --app flags works on Chrome, Brave, Edge
+                subprocess.Popen([binary, f"--app={url}", "--window-size=600,250"])
+            except Exception as e:
+                self.log(f"Error launching preview: {e}")
+                # Fallback to default browser (new tab)
+                import webbrowser
+                webbrowser.open(url)
+        else:
+            # Fallback
+            import webbrowser
+            webbrowser.open(url)
+
     def write_template_file(self):
+        # (Template omitted for brevity)
         html_content = """
 <!DOCTYPE html>
 <html lang="en">
@@ -339,6 +848,7 @@ class RumbleRepostTracker:
         let currentConfigStr = "";
         const audio = new Audio();
         let lastPlayedAudioTime = 0;
+        let fadeTimer = null;
 
         function loadGoogleFont(fontName) {
             if (!fontName) return;
@@ -352,6 +862,22 @@ class RumbleRepostTracker:
             }
             link.href = `https://fonts.googleapis.com/css?family=${fontName.replace(/ /g, '+')}`;
             document.body.style.fontFamily = `'${fontName}', sans-serif`;
+        }
+
+        function fadeOutAudio(duration) {
+            const step = 0.05;
+            const interval = duration / (1.0 / step);
+
+            const fade = setInterval(() => {
+                if (audio.volume > step) {
+                    audio.volume -= step;
+                } else {
+                    audio.volume = 0;
+                    audio.pause();
+                    audio.currentTime = 0;
+                    clearInterval(fade);
+                }
+            }, interval);
         }
 
         function update() {
@@ -384,10 +910,19 @@ class RumbleRepostTracker:
 
                     if (data.audio_timestamp > lastPlayedAudioTime) {
                         lastPlayedAudioTime = data.audio_timestamp;
+
+                        if(fadeTimer) clearTimeout(fadeTimer);
+
                         audio.currentTime = 0;
+                        audio.volume = 1.0; 
+
                         var playPromise = audio.play();
                         if (playPromise !== undefined) {
-                            playPromise.catch(error => {
+                            playPromise.then(() => {
+                                fadeTimer = setTimeout(() => {
+                                    fadeOutAudio(2000); 
+                                }, 18000);
+                            }).catch(error => {
                                 console.log("Audio play failed: " + error);
                             });
                         }
@@ -417,399 +952,181 @@ class RumbleRepostTracker:
         except Exception as e:
             print(f"Error writing template: {e}")
 
-    # --- UI HELPERS ---
-    def choose_color(self, config_key, btn_widget):
-        curr = GLOBAL_CONFIG.get(config_key, "#ffffff")
-        color = colorchooser.askcolor(color=curr, title=f"Choose Color")[1]
-        if color:
-            GLOBAL_CONFIG[config_key] = color
-            btn_widget.config(bg=color)
-            self.save_config()
-
-    def set_int_config(self, key, val):
-        try:
-            GLOBAL_CONFIG[key] = int(val)
-            self.save_config()
-        except:
-            pass
-
-    def browse_sound(self):
-        f = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3")])
-        if f: self.sound_path_var.set(f)
-
-    # --- QUEUE PROCESSOR ---
-    def _queue_processor(self):
-        while True:
-            try:
-                alert_data = REPOST_QUEUE.get()
-
-                # 1. Update Visuals
-                TRACKER_STATE["current_alert"] = alert_data
-                TRACKER_STATE["is_visible"] = True
-
-                # 2. Handle Audio Logic
-                audio_path = GLOBAL_CONFIG.get("sound_file", "")
-                audio_duration = 0.0
-
-                if audio_path and os.path.exists(audio_path) and not self.is_muted.get():
-                    # TRIGGER OVERLAY AUDIO (Timestamp)
-                    TRACKER_STATE["audio_timestamp"] = time.time()
-
-                    # Get length
-                    try:
-                        sound = pygame.mixer.Sound(audio_path)
-                        audio_duration = sound.get_length()
-                    except:
-                        pass
-
-                # 3. Calculate Display Duration
-                # Rule: Minimum 10 seconds, OR length of audio if > 10s
-                display_time = max(10.0, audio_duration)
-
-                # Wait while overlay is visible
-                time.sleep(display_time)
-
-                # 4. Hide Alert
-                TRACKER_STATE["is_visible"] = False
-
-                # 5. Buffer
-                time.sleep(5.0)
-
-            except Exception as e:
-                print(f"Queue Error: {e}")
-                time.sleep(1)
-
-    def play_sound(self):
-        TRACKER_STATE["audio_timestamp"] = time.time()
-        f = self.sound_path_var.get()
-        if f and os.path.exists(f):
-            try:
-                pygame.mixer.Sound(f).play()
-            except:
-                pass
-
-    # --- BROWSER CONFIGURATION UI METHODS ---
-    def browse_browser_exe(self):
-        f = filedialog.askopenfilename(filetypes=[("Executables", "*.exe")])
-        if f:
-            self.custom_browser_path_var.set(f)
-
-    def update_browser_ui_state(self, *args):
-        """Enables/Disables dropdown based on override checkbox."""
-        if self.use_override_var.get():
-            self.cb_browser_select.state(['disabled'])
-            self.btn_browse_exe.config(state='normal')
-            self.entry_browser_path.config(state='normal')
-        else:
-            self.cb_browser_select.state(['!disabled'])
-            self.btn_browse_exe.config(state='disabled')
-            self.entry_browser_path.config(state='disabled')
-
-            # --- BROWSER LAUNCH LOGIC ---
-
-    def start_browser(self):
-        threading.Thread(target=self._init_browser, daemon=True).start()
-
-    def _init_browser(self):
-        self.log("Initializing Browser Driver...")
-
-        # Determine Path
-        binary_path = ""
-
-        if self.use_override_var.get():
-            binary_path = self.custom_browser_path_var.get()
-            if not binary_path or not os.path.exists(binary_path):
-                self.log("ERROR: Custom browser path invalid!")
-                return
-            self.log(f"Using Custom Browser: {os.path.basename(binary_path)}")
-        else:
-            selection = self.selected_browser_var.get()
-            if selection in self.browser_map and self.browser_map[selection]:
-                binary_path = self.browser_map[selection]
-                self.log(f"Using Detected Browser: {selection}")
-            elif selection == "Auto-Detect":
-                self.log("Using Default Auto-Detect (Chrome)...")
-                binary_path = ""  # Let UC find default
-            else:
-                self.log("Warning: Selection invalid, trying default.")
-
-        try:
-            opts = uc.ChromeOptions()
-            opts.add_argument("--mute-audio")
-
-            # If we found a specific path (Brave/Edge/Opera), set it
-            if binary_path:
-                opts.binary_location = binary_path
-
-            # Launch
-            self.driver = uc.Chrome(options=opts)
-            self.driver.get("https://rumble.com/login.php")
-            self.log("Browser Ready. Please Login.")
-            self.root.after(0, lambda: self.btn_track.config(state="normal"))
-        except Exception as e:
-            self.log(f"Browser Init Error: {e}")
-            if "unrecognized chrome version" in str(e).lower() or "session not created" in str(e).lower():
-                self.log("ERROR: Browser Incompatible.")
-                self.root.after(0, lambda: messagebox.showerror("Browser Error",
-                                                                "The selected browser (e.g. Edge) is not compatible with the driver.\n\nPlease use Google Chrome or Brave."))
-            elif "binary" in str(e).lower():
-                self.log("Tip: Try using the 'Override' option to manually find your browser .exe")
-
-    def toggle_tracking(self):
-        if not self.is_tracking:
-            self.is_tracking = True
-            self.btn_track.config(text="Stop Tracking", bg="#ff9999")
-
-            try:
-                self.driver.minimize_window()
-            except:
-                pass
-
-            threading.Thread(target=self._tracker_loop, daemon=True).start()
-        else:
-            self.is_tracking = False
-            self.btn_track.config(text="Start Tracking", bg="#90ee90")
-            self.log("Tracking Stopped.")
-
-    def _tracker_loop(self):
-        self.log(f"Tracking Active. Interval: {GLOBAL_CONFIG['poll_interval']}s")
-        while self.is_tracking:
-            # 1. Safety Check: If driver is gone, stop.
-            if not self.driver:
-                self.log("Browser driver missing. Stopping.")
-                self.root.after(0, self.toggle_tracking)
-                break
-
-            try:
-                self.driver.refresh()
-                time.sleep(3)
-
-                try:
-                    bell_btn = self.driver.find_element(By.CSS_SELECTOR, ".user-notifications--bell-button")
-                    self.driver.execute_script("arguments[0].click();", bell_btn)
-                    time.sleep(1.5)
-                except Exception as e:
-                    # Check for dead browser here
-                    if "invalid session id" in str(e).lower() or "no such window" in str(e).lower():
-                        raise e
-                    self.log("Notifications not found. Retrying...")
-                    time.sleep(5)
-                    continue
-
-                soup = BeautifulSoup(self.driver.page_source, 'html.parser')
-                notif_list = soup.find("ul", class_="user-notifications--list")
-
-                if notif_list:
-                    items = notif_list.find_all("li")
-                    batch_reposts = []
-
-                    for li in items:
-                        text_div = li.find("div", class_="user-notifications--text")
-                        if not text_div: continue
-                        body_div = text_div.find("div", class_="user-notifications--body")
-                        if not body_div: continue
-
-                        full_text = body_div.get_text(" ", strip=True)
-
-                        if "reposted your video" in full_text:
-                            n_id = hashlib.md5(full_text.encode('utf-8')).hexdigest()
-
-                            if n_id not in self.seen_reposts:
-                                self.seen_reposts.add(n_id)
-                                self.save_history()
-
-                                user_link = body_div.find("a")
-                                user = user_link.text if user_link else "Unknown"
-
-                                vid_title = "Unknown"
-                                if '"' in full_text:
-                                    parts = full_text.split('"')
-                                    if len(parts) > 1: vid_title = parts[1]
-
-                                batch_reposts.append({"user": user, "video": vid_title})
-                                self.log(f"NEW REPOST QUEUED: {user}")
-
-                    for item in reversed(batch_reposts):
-                        REPOST_QUEUE.put(item)
-
-            except Exception as e:
-                # CRITICAL ERROR HANDLING
-                err_msg = str(e).lower()
-                if "invalid session id" in err_msg or "no such window" in err_msg or "target window already closed" in err_msg:
-                    self.log("Browser closed. Tracking stopped.")
-                    self.is_tracking = False
-                    self.root.after(0, lambda: self.btn_track.config(text="Start Tracking", bg="#90ee90"))
-                    self.driver = None
-                    break
-                else:
-                    print(f"Loop Error: {e}")
-
-            time.sleep(int(GLOBAL_CONFIG['poll_interval']))
-
-    def on_close(self):
-        self.is_tracking = False
-        try:
-            if self.driver: self.driver.quit()
-        except:
-            pass
-        self.root.destroy()
-        sys.exit(0)
-
     # --- UI SETUP ---
     def setup_ui(self):
-        tabs = ttk.Notebook(self.root)
-        self.tab_main = ttk.Frame(tabs)
-        self.tab_style = ttk.Frame(tabs)
-        tabs.add(self.tab_main, text="Controls")
-        tabs.add(self.tab_style, text="Style & Config")
-        tabs.pack(expand=1, fill="both")
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_columnconfigure(0, weight=1)
+
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
+        self.tabview.add("Controls")
+        self.tabview.add("Style & Config")
 
         # === TAB 1: CONTROLS ===
-        self.lbl_title = tk.Label(self.tab_main, text="Rumble Repost Tracker", font=("Arial", 16, "bold"))
+        tab_main = self.tabview.tab("Controls")
+
+        self.lbl_title = ctk.CTkLabel(tab_main, text="Rumble Repost Tracker", font=ctk.CTkFont(size=20, weight="bold"))
         self.lbl_title.pack(pady=10)
 
-        # --- BROWSER SELECTION FRAME ---
-        browser_frame = tk.LabelFrame(self.tab_main, text="Browser Configuration", padx=10, pady=10)
-        browser_frame.pack(fill="x", padx=20, pady=5)
+        # Browser Frame
+        browser_frame = ctk.CTkFrame(tab_main)
+        browser_frame.pack(fill="x", padx=10, pady=10)
 
-        # Dropdown row
-        f_row1 = tk.Frame(browser_frame)
-        f_row1.pack(fill="x", pady=2)
-        tk.Label(f_row1, text="Browser In Use:").pack(side="left")
+        ctk.CTkLabel(browser_frame, text="Browser Configuration", font=ctk.CTkFont(size=14, weight="bold")).pack(
+            anchor="w", padx=10, pady=(10, 5))
 
-        # Populate Combobox values from detected map
+        f_row1 = ctk.CTkFrame(browser_frame, fg_color="transparent")
+        f_row1.pack(fill="x", pady=2, padx=10)
+        ctk.CTkLabel(f_row1, text="Browser In Use:").pack(side="left")
+
         browser_names = list(self.browser_map.keys())
-        self.cb_browser_select = ttk.Combobox(f_row1, textvariable=self.selected_browser_var, values=browser_names,
-                                              state="readonly", width=25)
-        self.cb_browser_select.pack(side="left", padx=10)
+        self.cb_browser_select = ctk.CTkComboBox(f_row1, variable=self.selected_browser_var, values=browser_names)
+        self.cb_browser_select.pack(side="left", fill="x", expand=True, padx=10)
 
-        # Override row
-        f_row2 = tk.Frame(browser_frame)
-        f_row2.pack(fill="x", pady=5)
+        f_row2 = ctk.CTkFrame(browser_frame, fg_color="transparent")
+        f_row2.pack(fill="x", pady=5, padx=10)
 
-        chk_override = tk.Checkbutton(f_row2, text="Manual Override Path", variable=self.use_override_var,
-                                      command=self.update_browser_ui_state)
+        chk_override = ctk.CTkCheckBox(f_row2, text="Manual Override Path", variable=self.use_override_var,
+                                       command=self.update_browser_ui_state)
         chk_override.pack(side="left")
 
-        self.entry_browser_path = tk.Entry(f_row2, textvariable=self.custom_browser_path_var)
-        self.entry_browser_path.pack(side="left", fill="x", expand=True, padx=5)
+        self.entry_browser_path = ctk.CTkEntry(f_row2, textvariable=self.custom_browser_path_var)
+        self.entry_browser_path.pack(side="left", fill="x", expand=True, padx=10)
 
-        self.btn_browse_exe = tk.Button(f_row2, text="Browse...", command=self.browse_browser_exe, width=8)
+        self.btn_browse_exe = ctk.CTkButton(f_row2, text="Browse...", command=self.browse_browser_exe, width=80)
         self.btn_browse_exe.pack(side="left")
-        # --------------------------------
 
-        self.btn_browser = tk.Button(self.tab_main, text="1. Open Browser & Login", command=self.start_browser,
-                                     bg="#e0e0e0", height=2)
-        self.btn_browser.pack(fill="x", padx=40, pady=5)
+        # --- LOGIN ROW CONTAINER ---
+        login_row_frame = ctk.CTkFrame(tab_main, fg_color="transparent")
+        login_row_frame.pack(fill="x", padx=40, pady=10)
 
-        self.btn_track = tk.Button(self.tab_main, text="2. Start Tracking", command=self.toggle_tracking, bg="#90ee90",
-                                   height=2, state="disabled")
-        self.btn_track.pack(fill="x", padx=40, pady=5)
+        self.chk_remember_login = ctk.CTkCheckBox(login_row_frame, text="Remember Login",
+                                                  variable=self.remember_login_var, command=self.save_config)
+        self.chk_remember_login.pack(side="left", padx=(0, 10))
 
-        self.btn_mute = tk.Checkbutton(self.tab_main, text="MUTE AUDIO ALERTS", variable=self.is_muted,
-                                       font=("Arial", 12, "bold"), fg="red", selectcolor="black", indicatoron=0,
-                                       height=2)
-        self.btn_mute.pack(fill="x", padx=60, pady=15)
+        self.btn_browser = ctk.CTkButton(login_row_frame, text="1. Login & Capture", command=self.start_login_process,
+                                         height=40)
+        self.btn_browser.pack(side="left", fill="x", expand=True)
 
-        frame_obs = tk.LabelFrame(self.tab_main, text="OBS Setup (Recommended)", padx=10, pady=10)
+        self.btn_track = ctk.CTkButton(tab_main, text="2. Start Tracking (Background)", command=self.toggle_tracking,
+                                       height=40, state="disabled", fg_color="gray")
+        self.btn_track.pack(fill="x", padx=40, pady=10)
+
+        frame_obs = ctk.CTkFrame(tab_main)
         frame_obs.pack(fill="x", padx=20, pady=10)
-        tk.Label(frame_obs, text="1. In OBS, Add Source -> Browser").pack(anchor="w")
-        tk.Label(frame_obs, text="2. Check 'Local file'").pack(anchor="w")
-        tk.Label(frame_obs, text="3. Select 'overlay.html' from the app folder").pack(anchor="w")
+        ctk.CTkLabel(frame_obs, text="OBS Setup (Recommended)", font=ctk.CTkFont(weight="bold")).pack(anchor="w",
+                                                                                                      padx=10,
+                                                                                                      pady=(5, 0))
+        ctk.CTkLabel(frame_obs, text="1. In OBS, Add Source -> Browser").pack(anchor="w", padx=10)
+        ctk.CTkLabel(frame_obs, text="2. Check 'Local file'").pack(anchor="w", padx=10)
+        ctk.CTkLabel(frame_obs, text="3. Select 'overlay.html' from the app folder").pack(anchor="w", padx=10,
+                                                                                          pady=(0, 5))
 
-        frame_link = tk.LabelFrame(self.tab_main, text="Alternative: URL Mode", padx=10, pady=5)
+        frame_link = ctk.CTkFrame(tab_main)
         frame_link.pack(fill="x", padx=20, pady=5)
-        btn_copy = tk.Button(frame_link, text="Copy URL (http://127.0.0.1:5050)",
-                             command=lambda: [self.root.clipboard_clear(),
-                                              self.root.clipboard_append("http://127.0.0.1:5050"),
-                                              self.status_var.set("URL Copied!")],
-                             bg="#add8e6")
-        btn_copy.pack(fill="x")
+        btn_copy = ctk.CTkButton(frame_link, text="Copy URL (http://127.0.0.1:5050)",
+                                 command=lambda: [self.clipboard_clear(),
+                                                  self.clipboard_append("http://127.0.0.1:5050"),
+                                                  self.status_var.set("URL Copied!")],
+                                 fg_color="#3B8ED0", hover_color="#1F6AA5")
+        btn_copy.pack(fill="x", padx=5, pady=5)
 
-        self.log_list = tk.Listbox(self.tab_main, height=8)
-        self.log_list.pack(fill="both", padx=20, pady=10, expand=True)
+        self.log_textbox = ctk.CTkTextbox(tab_main, height=150)
+        self.log_textbox.pack(fill="both", padx=20, pady=10, expand=True)
+        self.log_textbox.configure(state="disabled")
 
-        self.lbl_status = tk.Label(self.tab_main, textvariable=self.status_var, bd=1, relief=tk.SUNKEN, anchor="w")
-        self.lbl_status.pack(side="bottom", fill="x")
+        self.btn_mute = ctk.CTkButton(tab_main, text="MUTE AUDIO ALERTS", command=self.toggle_mute, height=40,
+                                      fg_color="#555555", hover_color="#777777")
+        self.btn_mute.pack(fill="x", padx=40, pady=10)
+
+        self.status_label = ctk.CTkLabel(tab_main, textvariable=self.status_var, anchor="w", fg_color="transparent")
+        self.status_label.pack(side="bottom", fill="x", padx=20, pady=5)
 
         # === TAB 2: STYLE ===
-        frame_font = tk.LabelFrame(self.tab_style, text="Fonts & Layout", padx=5, pady=5)
-        frame_font.pack(fill="x", padx=10, pady=5)
+        tab_style = self.tabview.tab("Style & Config")
 
-        tk.Label(frame_font, text="Google Font:").grid(row=0, column=0, sticky="w")
-        tk.Entry(frame_font, textvariable=self.font_family_var, width=15).grid(row=0, column=1, sticky="ew")
+        # --- PREVIEW SECTION (NEW) ---
+        self.frame_preview = ctk.CTkFrame(tab_style, fg_color="#141414", border_color="#85c742", border_width=2,
+                                          corner_radius=12)
+        self.frame_preview.pack(fill="x", padx=20, pady=(20, 10))
 
-        frame_title = tk.LabelFrame(self.tab_style, text="Header Text", padx=5, pady=5)
-        frame_title.pack(fill="x", padx=10, pady=5)
+        # Note: We pack these with fill="x" so they take full width, allowing anchor (alignment) to work
+        self.lbl_prev_header = ctk.CTkLabel(self.frame_preview, text="NEW REPOST", font=("Roboto", 24, "bold"))
+        self.lbl_prev_header.pack(fill="x", padx=10, pady=(15, 5))
 
-        tk.Label(frame_title, text="Title:").grid(row=0, column=0, sticky="w")
-        tk.Entry(frame_title, textvariable=self.title_text_var).grid(row=0, column=1, sticky="ew")
+        self.lbl_prev_user = ctk.CTkLabel(self.frame_preview, text="RumbleUser123", font=("Roboto", 32, "bold"))
+        self.lbl_prev_user.pack(fill="x", padx=10, pady=2)
 
-        tk.Label(frame_title, text="Size:").grid(row=1, column=0, sticky="w")
-        sc_title = tk.Scale(frame_title, from_=10, to=50, orient="horizontal",
-                            command=lambda v: self.set_int_config('title_size', v))
-        sc_title.set(GLOBAL_CONFIG['title_size'])
-        sc_title.grid(row=1, column=1, sticky="ew")
+        self.lbl_prev_video = ctk.CTkLabel(self.frame_preview, text="Just Reposted This Video!",
+                                           font=("Roboto", 18, "italic"))
+        self.lbl_prev_video.pack(fill="x", padx=10, pady=(0, 15))
 
-        tk.Label(frame_title, text="Align:").grid(row=2, column=0, sticky="w")
-        cb_align = ttk.Combobox(frame_title, textvariable=self.title_align_var, values=["left", "center", "right"],
-                                state="readonly")
-        cb_align.grid(row=2, column=1, sticky="ew")
+        # NEW PREVIEW BUTTON
+        btn_launch_prev = ctk.CTkButton(tab_style, text="🚀 Pop-out Web Preview (Show Real Fonts)",
+                                        command=self.launch_web_preview, height=30, fg_color="#555555",
+                                        hover_color="#777777")
+        btn_launch_prev.pack(fill="x", padx=20, pady=5)
+        # -----------------------------
 
-        frame_col = tk.LabelFrame(self.tab_style, text="Colors", padx=5, pady=5)
-        frame_col.pack(fill="x", padx=10, pady=5)
+        frame_font = ctk.CTkFrame(tab_style)
+        frame_font.pack(fill="x", padx=10, pady=10)
+        ctk.CTkLabel(frame_font, text="Google Font:").pack(side="left", padx=10)
 
-        btn_t_col = tk.Button(frame_col, text="Header Color", bg=GLOBAL_CONFIG['title_color'],
-                              command=lambda: self.choose_color('title_color', btn_t_col))
-        btn_t_col.pack(fill="x", pady=2)
+        self.cb_font_family = ctk.CTkComboBox(frame_font, variable=self.font_family_var, values=GOOGLE_FONTS, width=200,
+                                              command=lambda x: self.update_live_preview())
+        self.cb_font_family.pack(side="left", fill="x", expand=True, padx=10, pady=10)
 
-        btn_r_col = tk.Button(frame_col, text="Username Color", bg=GLOBAL_CONFIG['recent_color'],
-                              command=lambda: self.choose_color('recent_color', btn_r_col))
-        btn_r_col.pack(fill="x", pady=2)
+        frame_title = ctk.CTkFrame(tab_style)
+        frame_title.pack(fill="x", padx=10, pady=10)
+        ctk.CTkLabel(frame_title, text="Title Text:").grid(row=0, column=0, sticky="w", padx=10, pady=5)
+        ctk.CTkEntry(frame_title, textvariable=self.title_text_var).grid(row=0, column=1, sticky="ew", padx=10, pady=5)
 
-        btn_o_col = tk.Button(frame_col, text="Video Title Color", bg=GLOBAL_CONFIG['older_color'],
-                              command=lambda: self.choose_color('older_color', btn_o_col))
-        btn_o_col.pack(fill="x", pady=2)
+        ctk.CTkLabel(frame_title, text="Size:").grid(row=1, column=0, sticky="w", padx=10, pady=5)
+        ctk.CTkSlider(frame_title, from_=10, to=50, command=lambda v: self.set_int_config('title_size', v)).grid(row=1,
+                                                                                                                 column=1,
+                                                                                                                 sticky="ew",
+                                                                                                                 padx=10,
+                                                                                                                 pady=5)
 
-        frame_audio = tk.LabelFrame(self.tab_style, text="Audio", padx=5, pady=5)
-        frame_audio.pack(fill="x", padx=10, pady=5)
-        tk.Button(frame_audio, text="Browse Sound", command=self.browse_sound).pack(side="left", padx=5)
-        tk.Button(frame_audio, text="Test", command=self.play_sound).pack(side="left", padx=5)
+        ctk.CTkLabel(frame_title, text="Align:").grid(row=2, column=0, sticky="w", padx=10, pady=5)
+        ctk.CTkComboBox(frame_title, variable=self.title_align_var, values=["left", "center", "right"],
+                        command=lambda x: self.update_live_preview()).grid(row=2, column=1, sticky="ew", padx=10,
+                                                                           pady=5)
+        frame_title.grid_columnconfigure(1, weight=1)
 
-        tk.Button(self.tab_style, text="Apply & Save All", command=self.save_config, bg="#90ee90").pack(fill="x",
-                                                                                                        padx=20,
-                                                                                                        pady=15)
+        frame_col = ctk.CTkFrame(tab_style)
+        frame_col.pack(fill="x", padx=10, pady=10)
 
-    # --- SCALING ---
-    def on_ctrl_scroll(self, event, manual_delta=None):
-        delta = manual_delta if manual_delta else event.delta
-        if delta > 0:
-            self.current_font_size += 1
-        else:
-            self.current_font_size -= 1
-        self.current_font_size = max(8, min(self.current_font_size, 30))
-        self.update_app_fonts()
+        btn_t_col = ctk.CTkButton(frame_col, text="Header Color", fg_color=GLOBAL_CONFIG['title_color'],
+                                  text_color="black",
+                                  command=lambda: self.choose_color('title_color', btn_t_col))
+        btn_t_col.pack(fill="x", pady=5, padx=10)
 
-    def update_app_fonts(self):
-        new_font = ("Arial", self.current_font_size)
-        title_font = ("Arial", self.current_font_size + 6, "bold")
-        style = ttk.Style()
-        style.configure('.', font=new_font)
+        btn_r_col = ctk.CTkButton(frame_col, text="Username Color", fg_color=GLOBAL_CONFIG['recent_color'],
+                                  text_color="black",
+                                  command=lambda: self.choose_color('recent_color', btn_r_col))
+        btn_r_col.pack(fill="x", pady=5, padx=10)
 
-        def update_widget(w):
-            try:
-                if w == self.lbl_title:
-                    w.config(font=title_font)
-                else:
-                    w.config(font=new_font)
-            except:
-                pass
-            for c in w.winfo_children(): update_widget(c)
+        btn_o_col = ctk.CTkButton(frame_col, text="Video Title Color", fg_color=GLOBAL_CONFIG['older_color'],
+                                  text_color="black",
+                                  command=lambda: self.choose_color('older_color', btn_o_col))
+        btn_o_col.pack(fill="x", pady=5, padx=10)
 
-        update_widget(self.root)
+        frame_audio = ctk.CTkFrame(tab_style)
+        frame_audio.pack(fill="x", padx=10, pady=10)
+        ctk.CTkLabel(frame_audio, text="Alert Sound").pack(pady=(5, 0))
+
+        f_audio_btns = ctk.CTkFrame(frame_audio, fg_color="transparent")
+        f_audio_btns.pack(pady=10)
+        ctk.CTkButton(f_audio_btns, text="Browse", command=self.browse_sound, width=80).pack(side="left", padx=5)
+        ctk.CTkButton(f_audio_btns, text="Test", command=self.play_sound, width=80).pack(side="left", padx=5)
+        ctk.CTkButton(f_audio_btns, text="Stop", command=self.stop_test_sound, fg_color="#FF5555",
+                      hover_color="#AA0000", width=80).pack(side="left", padx=5)
+
+        ctk.CTkButton(tab_style, text="Apply & Save All", command=self.save_config, height=40, fg_color="#2CC985",
+                      hover_color="#22AA66").pack(fill="x", padx=20, pady=20)
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = RumbleRepostTracker(root)
-    root.mainloop()
+    app = RumbleRepostTracker()
+    app.mainloop()
