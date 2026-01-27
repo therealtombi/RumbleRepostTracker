@@ -80,56 +80,5 @@ If your session times out, the app will warn you on startup. Simply click the "L
 **Font looking wrong in the App:**
 The Tkinter app can only display fonts installed on your Windows machine. To see the *true* rendering, click **"🚀 Pop-out Web Preview"**.
 
-sequenceDiagram
-    participant User
-    participant GUI as Python App (CTk)
-    participant VisibleDriver as Chrome (Visible)
-    participant HiddenDriver as Chrome (Minimized)
-    participant File as Cookie File (JSON)
-    participant Rumble as Rumble.com
-    participant Overlay as OBS/Web Source
-
-    box "Phase 1: Authentication" #f9f9f9
-    User->>GUI: Click "1. Login & Capture"
-    GUI->>VisibleDriver: Launch Browser
-    VisibleDriver->>Rumble: User logs in manually
-    loop Check Login Status
-        VisibleDriver->>Rumble: Check for Bell Icon
-        Rumble-->>VisibleDriver: Element Found
-    end
-    VisibleDriver->>GUI: Success Signal
-    GUI->>VisibleDriver: Extract Cookies & User-Agent
-    GUI->>File: Save Session Data (JSON)
-    GUI->>VisibleDriver: Close Window
-    GUI->>GUI: Update Button to "LOGGED IN"
-    end
-
-    box "Phase 2: Tracking" #e1f5fe
-    User->>GUI: Click "2. Start Tracking"
-    GUI->>File: Load Session Data
-    GUI->>HiddenDriver: Launch with Saved Cookies
-    Note right of HiddenDriver: Window Minimized immediately
-    
-    loop Every 5 Seconds
-        HiddenDriver->>Rumble: Refresh Notification Page
-        Rumble-->>HiddenDriver: HTML Content
-        HiddenDriver->>GUI: Parse for "Reposted your video"
-        
-        alt New Repost Detected
-            GUI->>Overlay: Update API JSON {user, video, timestamp}
-            Overlay->>Overlay: Trigger Animation & Sound
-        end
-    end
-    end
-
-    box "Phase 3: Live Config" #fff3e0
-    User->>GUI: Change Font/Color
-    GUI->>GUI: Update Global Config
-    Overlay->>GUI: Poll /api/data
-    GUI-->>Overlay: Return New Config
-    Overlay->>Overlay: Instant Re-render
-    end
-
-
 ## 📜 License
 MIT License
