@@ -131,7 +131,7 @@
                         if(fadeTimer) clearTimeout(fadeTimer);
 
                         audio.currentTime = 0;
-                        audio.volume = 1.0; 
+                        audio.volume = config.audio_volume !== undefined ? config.audio_volume : 1.0; 
 
                         var playPromise = audio.play();
                         if (playPromise !== undefined) {

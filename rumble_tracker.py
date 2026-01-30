@@ -20,7 +20,8 @@ import hashlib
 import logging
 import shutil
 import requests
-import subprocess  # NEW: Required for launching App Mode
+import subprocess
+import re
 
 # Web & Browser Libraries
 import undetected_chromedriver as uc
@@ -72,7 +73,9 @@ DEFAULT_CONFIG = {
     "browser_path": "",
     "selected_browser": "Auto-Detect",
     "use_override": False,
-    "remember_login": True
+    "remember_login": True,
+    "audio_volume": 0.5,
+    "chrome_version": 0
 }
 
 # --- GLOBAL SHARED STATE ---
@@ -202,6 +205,7 @@ class RumbleRepostTracker(ctk.CTk):
         self.test_overlay_timer = None
 
         self.login_btn_default_color = ["#3B8ED0", "#1F6AA5"]
+        self.error_logs = []
 
         # Configuration Vars
         self.load_config_to_global()
@@ -217,6 +221,7 @@ class RumbleRepostTracker(ctk.CTk):
         self.custom_browser_path_var = tk.StringVar(value=GLOBAL_CONFIG.get("browser_path", ""))
         self.use_override_var = tk.BooleanVar(value=GLOBAL_CONFIG.get("use_override", False))
         self.remember_login_var = tk.BooleanVar(value=GLOBAL_CONFIG.get("remember_login", True))
+        self.chrome_version_var = tk.StringVar(value=str(GLOBAL_CONFIG.get("chrome_version", 0)))
 
         self.write_template_file()
 
@@ -236,7 +241,6 @@ class RumbleRepostTracker(ctk.CTk):
 
         self.setup_ui()
 
-        # Setup Triggers for Live Preview
         self.title_text_var.trace_add("write", self.update_live_preview)
         self.font_family_var.trace_add("write", self.update_live_preview)
         self.title_align_var.trace_add("write", self.update_live_preview)
@@ -244,20 +248,48 @@ class RumbleRepostTracker(ctk.CTk):
         self.bind("<Control-MouseWheel>", self.on_ctrl_scroll)
         self.update_browser_ui_state()
 
-        # --- STARTUP COOKIE CHECK ---
         self.after(1000, self.check_cookie_status)
-
-        # Initial Preview Render
         self.update_live_preview()
 
     def log(self, msg):
         self.after(0, lambda: self._log_internal(msg))
 
     def _log_internal(self, msg):
+        timestamp = time.strftime('%H:%M:%S')
+        full_msg = f"[{timestamp}] {msg}\n"
+
         self.log_textbox.configure(state="normal")
-        self.log_textbox.insert("0.0", f"[{time.strftime('%H:%M:%S')}] {msg}\n")
+        self.log_textbox.insert("0.0", full_msg)
         self.log_textbox.configure(state="disabled")
         self.status_label.configure(text=msg)
+
+        lower_msg = msg.lower()
+        if any(x in lower_msg for x in ["error", "warning", "exception", "failed", "blocked", "mismatch"]):
+            self.error_logs.append(full_msg)
+            if hasattr(self, 'txt_error_logs'):
+                self.txt_error_logs.configure(state="normal")
+                self.txt_error_logs.insert("0.0", full_msg)
+                self.txt_error_logs.configure(state="disabled")
+
+    def copy_error_logs(self):
+        logs = "".join(self.error_logs)
+        if not logs: logs = "No errors recorded."
+        self.clipboard_clear()
+        self.clipboard_append(logs)
+        messagebox.showinfo("Copied", "Error logs copied to clipboard.")
+
+    def email_error_logs(self):
+        recipient = "the.real.tombliboos@gmail.com"
+        subject = "Rumble Tracker Error Log"
+        body_content = "".join(self.error_logs[-20:]) if self.error_logs else "No errors recorded."
+        body = f"Please describe the issue here:\n\n\n--- App Error Log (Last 20 entries) ---\n{body_content}"
+        params = {"subject": subject, "body": body}
+        query = urllib.parse.urlencode(params)
+        try:
+            webbrowser.open(f"mailto:{recipient}?{query}")
+        except Exception as e:
+            self.log(f"Failed to open email client: {e}")
+            messagebox.showerror("Error", "Could not open email client. Please copy logs manually.")
 
     # --- PERSISTENCE ---
     def load_config_to_global(self):
@@ -297,6 +329,12 @@ class RumbleRepostTracker(ctk.CTk):
         GLOBAL_CONFIG["use_override"] = self.use_override_var.get()
         GLOBAL_CONFIG["remember_login"] = self.remember_login_var.get()
 
+        try:
+            val = int(self.chrome_version_var.get())
+            GLOBAL_CONFIG["chrome_version"] = val
+        except:
+            GLOBAL_CONFIG["chrome_version"] = 0
+
         with open(CONFIG_FILE, "w") as f:
             json.dump(GLOBAL_CONFIG, f)
 
@@ -308,7 +346,6 @@ class RumbleRepostTracker(ctk.CTk):
             try:
                 cookies = self.driver.get_cookies()
                 ua = self.driver.execute_script("return navigator.userAgent")
-
                 with open(COOKIES_FILE, "w") as f:
                     json.dump({"cookies": cookies, "user_agent": ua}, f)
                 self.log("Session saved (Cookies + UA).")
@@ -335,14 +372,11 @@ class RumbleRepostTracker(ctk.CTk):
         return True
 
     def check_cookie_status(self):
-        if not self.remember_login_var.get():
-            return
-
+        if not self.remember_login_var.get(): return
         session = self.load_saved_session()
         if not session:
             self.log("No saved login found. Please log in.")
             return
-
         if self.validate_cookie_expiry(session):
             self.log("Valid saved session found. Ready to track.")
             self.btn_track.configure(state="normal", fg_color="#2CC985")
@@ -374,6 +408,12 @@ class RumbleRepostTracker(ctk.CTk):
         except:
             pass
 
+    def set_volume_config(self, value):
+        GLOBAL_CONFIG["audio_volume"] = float(value)
+        self.save_config()
+        if self.test_sound_channel:
+            self.test_sound_channel.set_volume(float(value))
+
     def browse_sound(self):
         f = filedialog.askopenfilename(filetypes=[("Audio", "*.wav *.mp3")])
         if f: self.sound_path_var.set(f)
@@ -392,10 +432,8 @@ class RumbleRepostTracker(ctk.CTk):
                 alert_data = REPOST_QUEUE.get()
                 TRACKER_STATE["current_alert"] = alert_data
                 TRACKER_STATE["is_visible"] = True
-
                 audio_path = GLOBAL_CONFIG.get("sound_file", "")
                 audio_duration = 0.0
-
                 if audio_path and os.path.exists(audio_path) and not self.is_muted.get():
                     TRACKER_STATE["audio_timestamp"] = time.time()
                     try:
@@ -403,13 +441,10 @@ class RumbleRepostTracker(ctk.CTk):
                         audio_duration = sound.get_length()
                     except:
                         pass
-
                 display_time = max(10.0, audio_duration)
                 time.sleep(display_time)
-
                 TRACKER_STATE["is_visible"] = False
                 time.sleep(5.0)
-
             except Exception as e:
                 print(f"Queue Error: {e}")
                 time.sleep(1)
@@ -419,13 +454,13 @@ class RumbleRepostTracker(ctk.CTk):
         TRACKER_STATE["audio_timestamp"] = time.time()
         TRACKER_STATE["current_alert"] = {"user": "TEST USER", "video": "Test Video Title"}
         TRACKER_STATE["is_visible"] = True
-
         f = self.sound_path_var.get()
         duration = 10.0
-
         if f and os.path.exists(f):
             try:
                 sound = pygame.mixer.Sound(f)
+                vol = GLOBAL_CONFIG.get("audio_volume", 0.5)
+                sound.set_volume(vol)
                 self.test_sound_channel = sound.play()
                 file_len = sound.get_length()
                 if file_len > 20:
@@ -435,7 +470,6 @@ class RumbleRepostTracker(ctk.CTk):
                     duration = max(10.0, file_len)
             except:
                 pass
-
         self.test_overlay_timer = self.after(int(duration * 1000), self.stop_test_overlay)
 
     def stop_test_overlay(self):
@@ -469,7 +503,43 @@ class RumbleRepostTracker(ctk.CTk):
             self.btn_browse_exe.configure(state="disabled")
             self.entry_browser_path.configure(state="disabled")
 
-    # --- BROWSER LAUNCH LOGIC ---
+    # --- ROBUST BROWSER LAUNCHER ---
+    def _safe_driver_launch(self):
+        """Attempts to launch driver, handling version mismatch automatically."""
+        # 1. Get Initial Options
+        opts = self.get_browser_options()
+
+        # 2. Check for manual override from Config
+        ver_arg = self.get_chrome_version_arg()
+        if ver_arg:
+            self.log(f"Using forced driver version: {ver_arg}")
+            return uc.Chrome(options=opts, version_main=ver_arg)
+
+        # 3. Try Default Auto-Detect Launch
+        try:
+            return uc.Chrome(options=opts)
+        except Exception as e:
+            err_msg = str(e)
+
+            # 4. Catch Version Mismatch
+            # Example error: "... Current browser version is 144.0.7559.110 ..."
+            if "Current browser version is" in err_msg:
+                self.log("Browser version mismatch detected. Attempting auto-fix...")
+
+                # Regex to extract the major version number
+                match = re.search(r"Current browser version is (\d+)\.", err_msg)
+                if match:
+                    detected_version = int(match.group(1))
+                    self.log(f"Auto-detected version {detected_version}. Retrying...")
+
+                    # IMPORTANT: Must generate FRESH options for the retry!
+                    # Reusing the old 'opts' object causes "cannot reuse ChromeOptions" error.
+                    new_opts = self.get_browser_options()
+                    return uc.Chrome(options=new_opts, version_main=detected_version)
+
+            # If not a version error or fix failed, re-raise
+            raise e
+
     def get_browser_options(self, binary_path=""):
         opts = uc.ChromeOptions()
         opts.add_argument("--mute-audio")
@@ -487,6 +557,13 @@ class RumbleRepostTracker(ctk.CTk):
             opts.binary_location = binary_path
 
         return opts
+
+    def get_chrome_version_arg(self):
+        try:
+            v = int(GLOBAL_CONFIG.get("chrome_version", 0))
+            return v if v > 0 else None
+        except:
+            return None
 
     def start_login_process(self):
         if self.btn_browser.cget("text").startswith("LOGGED IN"):
@@ -508,10 +585,10 @@ class RumbleRepostTracker(ctk.CTk):
 
     def _run_login_monitor(self):
         self.log("Opening Browser for Login...")
-        opts = self.get_browser_options()
 
         try:
-            self.driver = uc.Chrome(options=opts)
+            # Use Safe Launcher
+            self.driver = self._safe_driver_launch()
             self.driver.get("https://rumble.com/login.php")
             self.log("Please log in manually.")
 
@@ -537,6 +614,8 @@ class RumbleRepostTracker(ctk.CTk):
 
         except Exception as e:
             self.log(f"Login Init Error: {e}")
+            if "session not created" in str(e).lower():
+                self.after(0, lambda: messagebox.showerror("Version Error", f"Driver Error:\n{str(e)[:200]}..."))
             self.driver = None
             self.after(0, lambda: self.btn_browser.configure(state="normal", text="1. Login & Capture"))
 
@@ -554,7 +633,6 @@ class RumbleRepostTracker(ctk.CTk):
 
     def _tracker_loop_fetch(self):
         self.log("Starting API Tracker (Fetch Mode)...")
-
         session_data = self.load_saved_session()
         if not session_data or "cookies" not in session_data:
             self.log("No valid session found. Please Login.")
@@ -571,53 +649,41 @@ class RumbleRepostTracker(ctk.CTk):
             "Accept": "application/json, text/plain, */*",
             "Referer": "https://rumble.com/",
         }
-
         api_url = "https://rumble.com/service.php?name=user.notification_feed&limit=25"
-
         self.log(f"Tracking Active. Interval: {GLOBAL_CONFIG['poll_interval']}s")
 
         while self.is_tracking:
             try:
                 r = s.get(api_url, headers=headers)
-
                 if r.status_code == 200:
                     data = r.json()
-
                     if "data" in data and "items" in data["data"]:
                         items = data["data"]["items"]
                         batch_reposts = []
-
                         for item in items:
                             is_repost = False
                             user_name = "Unknown"
                             video_title = "Video"
-
                             if item.get("type") == "video_reposted":
                                 is_repost = True
                                 user_obj = item.get("user", {})
                                 video_obj = item.get("video", {})
                                 user_name = user_obj.get("username", user_obj.get("name", "Unknown"))
                                 video_title = video_obj.get("title", "Unknown Video")
-
                             elif "reposted" in item.get("body", "").lower():
                                 is_repost = True
                                 if "user" in item:
                                     user_name = item["user"].get("username", "Unknown")
-
                             if is_repost:
                                 unique_str = f"{user_name}_{video_title}_{item.get('created_on', '')}"
                                 n_id = hashlib.md5(unique_str.encode('utf-8')).hexdigest()
-
                                 if n_id not in self.seen_reposts:
                                     self.seen_reposts.add(n_id)
                                     self.save_history()
-
                                     batch_reposts.append({"user": user_name, "video": video_title})
                                     self.log(f"NEW REPOST: {user_name}")
-
                         for item in reversed(batch_reposts):
                             REPOST_QUEUE.put(item)
-
                 elif r.status_code == 403:
                     self.log("Session Blocked (403). Switching to Browser Mode...")
                     self.is_tracking = False
@@ -626,22 +692,18 @@ class RumbleRepostTracker(ctk.CTk):
                     break
                 else:
                     self.log(f"API Error: {r.status_code}")
-
             except Exception as e:
                 self.log(f"Fetch Error: {e}")
-
             time.sleep(int(GLOBAL_CONFIG['poll_interval']))
 
     def _tracker_loop(self):
-        # Fallback Selenium loop
         self.log("Starting Browser Tracker (Hidden)...")
         self.is_tracking = True
-
         session_data = self.load_saved_session()
 
         try:
-            opts = self.get_browser_options()
-            self.driver = uc.Chrome(options=opts)
+            # Use Safe Launcher
+            self.driver = self._safe_driver_launch()
             self.driver.minimize_window()
 
             if session_data:
@@ -665,7 +727,6 @@ class RumbleRepostTracker(ctk.CTk):
                 bell = self.driver.find_element(By.CSS_SELECTOR, ".user-notifications--bell-button")
                 self.driver.execute_script("arguments[0].click();", bell)
                 time.sleep(1.5)
-
                 soup = BeautifulSoup(self.driver.page_source, 'html.parser')
                 notif_list = soup.find("ul", class_="user-notifications--list")
                 if notif_list:
@@ -721,6 +782,8 @@ class RumbleRepostTracker(ctk.CTk):
             self.current_font_size -= 1
         self.current_font_size = max(8, min(self.current_font_size, 30))
         self.lbl_title.configure(font=ctk.CTkFont(family="Arial", size=self.current_font_size + 6, weight="bold"))
+        GLOBAL_CONFIG['title_size'] = self.current_font_size
+        self.update_live_preview()
 
     def update_app_fonts(self):
         pass
@@ -729,33 +792,24 @@ class RumbleRepostTracker(ctk.CTk):
 
     def update_live_preview(self, *args):
         self.lbl_prev_header.configure(text=self.title_text_var.get())
-
         fam = self.font_family_var.get()
         if not fam: fam = "Roboto"
-
         title_size = int(GLOBAL_CONFIG.get('title_size', 24))
-
         self.lbl_prev_header.configure(font=(fam, title_size, "bold"))
         self.lbl_prev_user.configure(font=(fam, 32, "bold"))
         self.lbl_prev_video.configure(font=(fam, 18, "italic"))
-
         self.lbl_prev_header.configure(text_color=GLOBAL_CONFIG.get('title_color', '#ffffff'))
         self.lbl_prev_user.configure(text_color=GLOBAL_CONFIG.get('recent_color', '#85c742'))
         self.lbl_prev_video.configure(text_color=GLOBAL_CONFIG.get('older_color', '#ffffff'))
-
         align_map = {"left": "w", "center": "center", "right": "e"}
         alignment = align_map.get(self.title_align_var.get(), "center")
-
         self.lbl_prev_header.configure(anchor=alignment)
         self.lbl_prev_user.configure(anchor=alignment)
         self.lbl_prev_video.configure(anchor=alignment)
 
     # --- NEW: LAUNCH WEB PREVIEW POPUP ---
     def launch_web_preview(self):
-        """Launches the overlay in a chrome 'app' window for perfect font rendering"""
         url = "http://127.0.0.1:5050"
-
-        # 1. Attempt to find a binary to use
         binary = None
         if self.use_override_var.get():
             binary = self.custom_browser_path_var.get()
@@ -763,19 +817,14 @@ class RumbleRepostTracker(ctk.CTk):
             selection = self.selected_browser_var.get()
             if selection in self.browser_map:
                 binary = self.browser_map[selection]
-
-        # 2. Launch
         if binary and os.path.exists(binary):
             try:
-                # --app flags works on Chrome, Brave, Edge
                 subprocess.Popen([binary, f"--app={url}", "--window-size=600,250"])
             except Exception as e:
                 self.log(f"Error launching preview: {e}")
-                # Fallback to default browser (new tab)
                 import webbrowser
                 webbrowser.open(url)
         else:
-            # Fallback
             import webbrowser
             webbrowser.open(url)
 
@@ -914,7 +963,7 @@ class RumbleRepostTracker(ctk.CTk):
                         if(fadeTimer) clearTimeout(fadeTimer);
 
                         audio.currentTime = 0;
-                        audio.volume = 1.0; 
+                        audio.volume = config.audio_volume !== undefined ? config.audio_volume : 1.0; 
 
                         var playPromise = audio.play();
                         if (playPromise !== undefined) {
@@ -961,6 +1010,7 @@ class RumbleRepostTracker(ctk.CTk):
         self.tabview.grid(row=0, column=0, padx=20, pady=20, sticky="nsew")
         self.tabview.add("Controls")
         self.tabview.add("Style & Config")
+        self.tabview.add("Error Logs")
 
         # === TAB 1: CONTROLS ===
         tab_main = self.tabview.tab("Controls")
@@ -996,6 +1046,15 @@ class RumbleRepostTracker(ctk.CTk):
         self.btn_browse_exe = ctk.CTkButton(f_row2, text="Browse...", command=self.browse_browser_exe, width=80)
         self.btn_browse_exe.pack(side="left")
 
+        # --- NEW: FORCE VERSION ROW ---
+        f_row3 = ctk.CTkFrame(browser_frame, fg_color="transparent")
+        f_row3.pack(fill="x", pady=5, padx=10)
+        ctk.CTkLabel(f_row3, text="Force Driver Version (0=Auto):").pack(side="left")
+
+        self.entry_chrome_version = ctk.CTkEntry(f_row3, textvariable=self.chrome_version_var, width=50)
+        self.entry_chrome_version.pack(side="left", padx=5)
+        # ------------------------------
+
         # --- LOGIN ROW CONTAINER ---
         login_row_frame = ctk.CTkFrame(tab_main, fg_color="transparent")
         login_row_frame.pack(fill="x", padx=40, pady=10)
@@ -1017,13 +1076,9 @@ class RumbleRepostTracker(ctk.CTk):
         ctk.CTkLabel(frame_obs, text="OBS Setup (Recommended)", font=ctk.CTkFont(weight="bold")).pack(anchor="w",
                                                                                                       padx=10,
                                                                                                       pady=(5, 0))
-        ctk.CTkLabel(frame_obs, text="1. In OBS, Add Source -> Browser").pack(anchor="w", padx=10,
-                                                                                          pady=(0, 5))
-        ctk.CTkLabel(frame_obs, text="2. Click 'Copy URL' and replace the URL in the OBS Browser Source").pack(anchor="w", padx=10,
-                                                                                          pady=(0, 5))
-        ctk.CTkLabel(frame_obs, text="3. Check 'Control audio via OBS'").pack(anchor="w", padx=10,
-                                                                                          pady=(0, 5))
-        ctk.CTkLabel(frame_obs, text="4. Do not enable 'Refresh browser when scene becomes active'").pack(anchor="w", padx=10,
+        ctk.CTkLabel(frame_obs, text="1. In OBS, Add Source -> Browser").pack(anchor="w", padx=10, pady=(0, 5))
+        ctk.CTkLabel(frame_obs, text="2. Check 'Local file'").pack(anchor="w", padx=10, pady=(0, 5))
+        ctk.CTkLabel(frame_obs, text="3. Select 'overlay.html' from the app folder").pack(anchor="w", padx=10,
                                                                                           pady=(0, 5))
 
         frame_link = ctk.CTkFrame(tab_main)
@@ -1049,12 +1104,10 @@ class RumbleRepostTracker(ctk.CTk):
         # === TAB 2: STYLE ===
         tab_style = self.tabview.tab("Style & Config")
 
-        # --- PREVIEW SECTION (NEW) ---
         self.frame_preview = ctk.CTkFrame(tab_style, fg_color="#141414", border_color="#85c742", border_width=2,
                                           corner_radius=12)
         self.frame_preview.pack(fill="x", padx=20, pady=(20, 10))
 
-        # Note: We pack these with fill="x" so they take full width, allowing anchor (alignment) to work
         self.lbl_prev_header = ctk.CTkLabel(self.frame_preview, text="NEW REPOST", font=("Roboto", 24, "bold"))
         self.lbl_prev_header.pack(fill="x", padx=10, pady=(15, 5))
 
@@ -1065,12 +1118,10 @@ class RumbleRepostTracker(ctk.CTk):
                                            font=("Roboto", 18, "italic"))
         self.lbl_prev_video.pack(fill="x", padx=10, pady=(0, 15))
 
-        # NEW PREVIEW BUTTON
         btn_launch_prev = ctk.CTkButton(tab_style, text="🚀 Pop-out Web Preview (Show Real Fonts)",
                                         command=self.launch_web_preview, height=30, fg_color="#555555",
                                         hover_color="#777777")
         btn_launch_prev.pack(fill="x", padx=20, pady=5)
-        # -----------------------------
 
         frame_font = ctk.CTkFrame(tab_style)
         frame_font.pack(fill="x", padx=10, pady=10)
@@ -1118,10 +1169,15 @@ class RumbleRepostTracker(ctk.CTk):
 
         frame_audio = ctk.CTkFrame(tab_style)
         frame_audio.pack(fill="x", padx=10, pady=10)
-        ctk.CTkLabel(frame_audio, text="Alert Sound").pack(pady=(5, 0))
+        ctk.CTkLabel(frame_audio, text="Alert Sound").pack(side="top", pady=(5, 0))
+
+        ctk.CTkLabel(frame_audio, text="Volume:").pack(side="left", padx=5)
+        slider_vol = ctk.CTkSlider(frame_audio, from_=0.0, to=1.0, command=self.set_volume_config)
+        slider_vol.set(GLOBAL_CONFIG.get("audio_volume", 0.5))
+        slider_vol.pack(side="left", fill="x", expand=True, padx=5)
 
         f_audio_btns = ctk.CTkFrame(frame_audio, fg_color="transparent")
-        f_audio_btns.pack(pady=10)
+        f_audio_btns.pack(side="bottom", pady=10)
         ctk.CTkButton(f_audio_btns, text="Browse", command=self.browse_sound, width=80).pack(side="left", padx=5)
         ctk.CTkButton(f_audio_btns, text="Test", command=self.play_sound, width=80).pack(side="left", padx=5)
         ctk.CTkButton(f_audio_btns, text="Stop", command=self.stop_test_sound, fg_color="#FF5555",
@@ -1129,6 +1185,23 @@ class RumbleRepostTracker(ctk.CTk):
 
         ctk.CTkButton(tab_style, text="Apply & Save All", command=self.save_config, height=40, fg_color="#2CC985",
                       hover_color="#22AA66").pack(fill="x", padx=20, pady=20)
+
+        # === TAB 3: ERROR LOGS ===
+        tab_logs = self.tabview.tab("Error Logs")
+
+        ctk.CTkLabel(tab_logs, text="Error & Warning Log", font=ctk.CTkFont(size=14, weight="bold")).pack(pady=5)
+
+        self.txt_error_logs = ctk.CTkTextbox(tab_logs, height=300)
+        self.txt_error_logs.pack(fill="both", expand=True, padx=10, pady=5)
+        self.txt_error_logs.configure(state="disabled")
+
+        btn_frame = ctk.CTkFrame(tab_logs, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=10, pady=10)
+
+        ctk.CTkButton(btn_frame, text="Copy to Clipboard", command=self.copy_error_logs).pack(side="left", expand=True,
+                                                                                              padx=5)
+        ctk.CTkButton(btn_frame, text="Email Support", command=self.email_error_logs, fg_color="#3B8ED0",
+                      hover_color="#1F6AA5").pack(side="left", expand=True, padx=5)
 
 
 if __name__ == "__main__":
