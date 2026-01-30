@@ -1,61 +1,94 @@
-# Rumble Repost Tracker (Pro) 🤖
+# Rumble Repost Tracker (Pro) v3.0 🤖
 
-A professional Python-based application for streamers that tracks reposts on your Rumble channel in real-time. It generates a customizable, animated overlay for OBS/Streamlabs and plays audio alerts when your content is reposted.
+**Rumble Repost Tracker** is a dedicated tool for streamers that monitors your Rumble notifications in real-time. When someone reposts your video, it triggers a customizable animated overlay (for OBS/Streamlabs) and plays an audio alert, allowing you to thank your supporters instantly.
 
-## 🚀 Features (v2.1)
+![App Screenshot](https://via.placeholder.com/800x450?text=Rumble+Repost+Tracker+Pro+Interface)
 
-* **Smart Session Capture:** Logs you in once via a visible browser window, captures your session cookies & user agent, and saves them securely. You don't need to log in every time you run the app.
-* **Hidden Background Tracking:** Runs a minimized, resource-optimized browser instance in the background to monitor notifications, ensuring Cloudflare checks are passed successfully.
-* **Modern Dark UI:** Built with `CustomTkinter` for a sleek, responsive Windows 11-style interface.
-* **Live Style Preview:** Instant feedback in the "Style & Config" tab. Change fonts, colors, and titles, and see them update immediately in the app.
-* **Google Fonts Integration:** Select from the top 50 most popular Google Fonts for streamers.
-* **Pop-out Web Preview:** Verify exactly how your overlay (and fonts) will render in OBS without needing to launch streaming software.
-* **Custom Audio:** Supports `.mp3` and `.wav` alert sounds with smart duration handling (minimum 10s, auto-fade at 20s).
+## 🚀 Key Features
+
+* **Smart Session Capture:** Logs you in securely using a visible browser, captures your session cookies, and stores them locally. You only need to log in once.
+* **Stealth Tracking:** Runs a hidden, resource-optimized browser instance in the background to bypass Cloudflare bot protection and 403 errors.
+* **OBS Integration:** Hosts a local web server to provide a clean, transparent browser source for your streaming software.
+* **Live Style Preview:** Customize colors, titles, and alignment in the app with instant visual feedback.
+* **Google Fonts:** Select from the top 50 most popular Google Fonts.
+    * *Includes a "Pop-out Web Preview" to verify font rendering exactly as it will appear on stream.*
+* **Audio Control:** Built-in volume slider and mute toggle. Audio can be routed through the OBS mixer.
+* **Auto-Fix Drivers:** Automatically detects Chrome version mismatches and attempts to self-repair, with a manual override option for stubborn drivers.
+* **Error Logging:** Dedicated tab for capturing issues with a direct "Email Support" button.
 
 ## 🛠️ Prerequisites
 
-* **OS:** Windows 10/11
-* **Browser:** A Chromium-based browser must be installed (Google Chrome, Brave, Edge, Opera, or Vivaldi).
+1.  **Operating System:** Windows 10 or 11.
+2.  **Browser:** **Google Chrome** is highly recommended. (Brave, Edge, or Opera may work but Chrome is preferred for driver stability).
 
 ## 📦 Installation
+
 ### Standalone Executable
-Download the `.exe` build using PyInstaller from the bottom of the release pages then, simply double-click `RumbleRepostTracker.exe`. No Python installation is required.
+* Download the `RumbleRepostTracker.exe` from the bottom of this page, simply double-click it to launch. No Python installation is required.
 
-## ▶️ How to Use
+## ▶️ User Guide
 
-### 1. Login & Capture
-1.  Go to the **"Controls"** tab.
-2.  Click **"1. Login & Capture"**. A visible browser window will open.
+### Phase 1: Authentication
+1.  Go to the **Controls** tab.
+2.  Click **"1. Login & Capture"**. A Chrome window will open.
 3.  Log in to your Rumble account manually.
-4.  **Wait:** Once the app detects you are logged in (it sees the notification bell), it will automatically save your session and close the window.
-5.  The button will turn green and say **"LOGGED IN"**.
+4.  **Wait:** As soon as the app detects the "Notification Bell" inside the browser, it will automatically save your session and close the window.
+5.  The button will turn green and read **"LOGGED IN"**.
 
-### 2. Start Tracking
-1.  Click **"2. Start Tracking (Background)"**.
-2.  The app will launch a hidden (minimized) browser instance using your saved session.
-3.  It will poll your feed every 5 seconds for new "Repost" notifications.
+### Phase 2: Configuration
+1.  Go to the **Style & Config** tab.
+2.  **Customize:** Change the Title text, Font, Colors, and Alignment.
+3.  **Audio:** Select a sound file (`.mp3` or `.wav`) and adjust the **Volume Slider**.
+4.  **Preview:**
+    * *App Preview:* Shows a rough approximation (uses System Fonts).
+    * *Pop-out Preview:* Click **🚀 Pop-out Web Preview** to open a window showing exactly how the HTML/CSS/Google Fonts will look on stream.
 
-### 3. Setup in OBS
-1.  Add a new **Browser Source** in OBS.
-2.  **Uncheck** "Local File".
-3.  Set URL to: `http://127.0.0.1:5050`
-4.  Set Width: `1920` (or your canvas width) and Height: `300`.
-5.  **Important:** Check **"Control audio via OBS"** if you want the alert sound to go through your stream mixer.
+### Phase 3: OBS Setup
+1.  Open OBS Studio.
+2.  Add a **Browser Source**.
+3.  **Uncheck** "Local File".
+4.  Set the URL to: `http://127.0.0.1:5050`
+5.  Set Width: `1920` (or your canvas width) and Height: `300`.
+6.  **Recommended:** Check **"Control audio via OBS"** to manage alert volume within your streaming mixer.
+7.  **Do NOT** check "Refresh browser when scene becomes active".
 
-## 🎨 Customization
-* Navigate to the **"Style & Config"** tab.
-* **Live Preview:** As you type a new title or select a font, the preview box updates instantly.
-* **Fonts:** Pick from the list of 50 Google Fonts. 
-    * *Note:* The App Preview uses system fonts. If a Google Font isn't installed on your PC, the preview might default to Arial, but the **OBS Overlay/Web Preview** will always render the correct font from the web.
-* **Test:** Click the "Test" button to play the sound and trigger a fake alert on the overlay.
+### Phase 4: Go Live!
+1.  Back in the app's **Controls** tab, click **"2. Start Tracking (Background)"**.
+2.  The app will launch a hidden background process to monitor your feed every 5 seconds.
+3.  You can minimize the app (do not close it) and start streaming.
 
-## 🔧 Troubleshooting
+## 🔧 Troubleshooting & FAQ
 
-**"Login Expired" Warning:**
-If your session times out, the app will warn you on startup. Simply click the "LOGGED IN" button (which resets the session) and click "1. Login & Capture" to sign in again.
+### **"Session not created / Chrome Driver Version Mismatch"**
+If Chrome updates in the background, the tracker might crash.
+* **Auto-Fix:** The app attempts to fix this automatically on restart.
+* **Manual Fix:** Go to the **Controls** tab. In the **"Force Driver Version"** box, type your Chrome major version (e.g., `144`) and click Save. Restart the app.
 
-**Font looking wrong in the App:**
-The Tkinter app can only display fonts installed on your Windows machine. To see the *true* rendering, click **"🚀 Pop-out Web Preview"**.
+### **"The font in the App Preview looks basic/wrong"**
+The Python app window can only display fonts installed on your Windows system.
+* The **OBS Overlay** (and the Pop-out Web Preview) downloads fonts from the internet, so your stream will always look correct even if the app preview looks generic.
 
-## 📜 License
-MIT License
+### **"Login Expired"**
+Cookies eventually expire. If you see this warning:
+1.  Click the Green **"LOGGED IN"** button (this resets your session).
+2.  Click **"1. Login & Capture"** to sign in again.
+
+### **"Session Blocked (403)"**
+If Cloudflare blocks the connection:
+* The app will automatically log this in the "Error Logs" tab.
+* It will attempt to switch tracking modes automatically.
+* If it persists, click "Login & Capture" to refresh your credentials.
+
+## 📞 Support
+
+If you encounter persistent issues:
+1.  Go to the **Error Logs** tab.
+2.  Click **"Email Support"**.
+3.  This will draft an email to `the.real.tombliboos@gmail.com` with your error history attached.
+
+---
+
+## 📄 License
+MIT License. Free to use and modify.
+
+---
