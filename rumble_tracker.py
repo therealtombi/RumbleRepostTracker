@@ -22,6 +22,7 @@ import shutil
 import requests
 import subprocess
 import re
+import urllib.parse
 
 # Web & Browser Libraries
 import undetected_chromedriver as uc
@@ -39,6 +40,7 @@ ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("green")
 
 # --- GLOBAL CONFIGURATION ---
+APP_VERSION = "v3.0"
 CONFIG_FILE = "tracker_config.json"
 HISTORY_FILE = "repost_history.json"
 COOKIES_FILE = "saved_cookies.json"
@@ -180,7 +182,7 @@ def find_browsers():
 class RumbleRepostTracker(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Rumble Repost Tracker (Pro)")
+        self.title(f"Rumble Repost Tracker (Pro) {APP_VERSION}")
         self.geometry("1920x1080")
 
         if os.path.exists(ICON_FILE):
@@ -268,21 +270,25 @@ class RumbleRepostTracker(ctk.CTk):
             self.error_logs.append(full_msg)
             if hasattr(self, 'txt_error_logs'):
                 self.txt_error_logs.configure(state="normal")
-                self.txt_error_logs.insert("0.0", full_msg)
+                # Insert below the version header (index 2.0) to keep version at top
+                self.txt_error_logs.insert("2.0", full_msg)
                 self.txt_error_logs.configure(state="disabled")
 
     def copy_error_logs(self):
-        logs = "".join(self.error_logs)
-        if not logs: logs = "No errors recorded."
+        # Gather text from the widget directly to include version header
+        logs = self.txt_error_logs.get("0.0", "end")
         self.clipboard_clear()
         self.clipboard_append(logs)
         messagebox.showinfo("Copied", "Error logs copied to clipboard.")
 
     def email_error_logs(self):
         recipient = "the.real.tombliboos@gmail.com"
-        subject = "Rumble Tracker Error Log"
-        body_content = "".join(self.error_logs[-20:]) if self.error_logs else "No errors recorded."
-        body = f"Please describe the issue here:\n\n\n--- App Error Log (Last 20 entries) ---\n{body_content}"
+        subject = f"Rumble Tracker {APP_VERSION} Error Log"
+
+        # Get logs from memory list
+        logs_text = "".join(self.error_logs[-20:]) if self.error_logs else "No recent errors."
+
+        body = f"Version: {APP_VERSION}\nDescribe issue:\n\n\n--- Logs ---\n{logs_text}"
         params = {"subject": subject, "body": body}
         query = urllib.parse.urlencode(params)
         try:
@@ -513,37 +519,35 @@ class RumbleRepostTracker(ctk.CTk):
         ver_arg = self.get_chrome_version_arg()
         if ver_arg:
             self.log(f"Using forced driver version: {ver_arg}")
-            return uc.Chrome(options=opts, version_main=ver_arg)
+            return uc.Chrome(options=opts, version_main=ver_arg, use_subprocess=True)
 
         # 3. Try Default Auto-Detect Launch
         try:
-            return uc.Chrome(options=opts)
+            return uc.Chrome(options=opts, use_subprocess=True)
         except Exception as e:
             err_msg = str(e)
 
             # 4. Catch Version Mismatch
-            # Example error: "... Current browser version is 144.0.7559.110 ..."
             if "Current browser version is" in err_msg:
                 self.log("Browser version mismatch detected. Attempting auto-fix...")
 
-                # Regex to extract the major version number
                 match = re.search(r"Current browser version is (\d+)\.", err_msg)
                 if match:
                     detected_version = int(match.group(1))
                     self.log(f"Auto-detected version {detected_version}. Retrying...")
 
-                    # IMPORTANT: Must generate FRESH options for the retry!
-                    # Reusing the old 'opts' object causes "cannot reuse ChromeOptions" error.
+                    # Generate FRESH options for retry
                     new_opts = self.get_browser_options()
-                    return uc.Chrome(options=new_opts, version_main=detected_version)
+                    return uc.Chrome(options=new_opts, version_main=detected_version, use_subprocess=True)
 
-            # If not a version error or fix failed, re-raise
             raise e
 
     def get_browser_options(self, binary_path=""):
         opts = uc.ChromeOptions()
         opts.add_argument("--mute-audio")
         opts.add_argument("--disable-gpu")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
 
         if not binary_path:
             if self.use_override_var.get():
@@ -587,7 +591,6 @@ class RumbleRepostTracker(ctk.CTk):
         self.log("Opening Browser for Login...")
 
         try:
-            # Use Safe Launcher
             self.driver = self._safe_driver_launch()
             self.driver.get("https://rumble.com/login.php")
             self.log("Please log in manually.")
@@ -649,41 +652,53 @@ class RumbleRepostTracker(ctk.CTk):
             "Accept": "application/json, text/plain, */*",
             "Referer": "https://rumble.com/",
         }
+
         api_url = "https://rumble.com/service.php?name=user.notification_feed&limit=25"
+
         self.log(f"Tracking Active. Interval: {GLOBAL_CONFIG['poll_interval']}s")
 
         while self.is_tracking:
             try:
                 r = s.get(api_url, headers=headers)
+
                 if r.status_code == 200:
                     data = r.json()
+
                     if "data" in data and "items" in data["data"]:
                         items = data["data"]["items"]
                         batch_reposts = []
+
                         for item in items:
                             is_repost = False
                             user_name = "Unknown"
                             video_title = "Video"
+
                             if item.get("type") == "video_reposted":
                                 is_repost = True
                                 user_obj = item.get("user", {})
                                 video_obj = item.get("video", {})
                                 user_name = user_obj.get("username", user_obj.get("name", "Unknown"))
                                 video_title = video_obj.get("title", "Unknown Video")
+
                             elif "reposted" in item.get("body", "").lower():
                                 is_repost = True
                                 if "user" in item:
                                     user_name = item["user"].get("username", "Unknown")
+
                             if is_repost:
                                 unique_str = f"{user_name}_{video_title}_{item.get('created_on', '')}"
                                 n_id = hashlib.md5(unique_str.encode('utf-8')).hexdigest()
+
                                 if n_id not in self.seen_reposts:
                                     self.seen_reposts.add(n_id)
                                     self.save_history()
+
                                     batch_reposts.append({"user": user_name, "video": video_title})
                                     self.log(f"NEW REPOST: {user_name}")
+
                         for item in reversed(batch_reposts):
                             REPOST_QUEUE.put(item)
+
                 elif r.status_code == 403:
                     self.log("Session Blocked (403). Switching to Browser Mode...")
                     self.is_tracking = False
@@ -692,8 +707,10 @@ class RumbleRepostTracker(ctk.CTk):
                     break
                 else:
                     self.log(f"API Error: {r.status_code}")
+
             except Exception as e:
                 self.log(f"Fetch Error: {e}")
+
             time.sleep(int(GLOBAL_CONFIG['poll_interval']))
 
     def _tracker_loop(self):
@@ -702,9 +719,12 @@ class RumbleRepostTracker(ctk.CTk):
         session_data = self.load_saved_session()
 
         try:
-            # Use Safe Launcher
             self.driver = self._safe_driver_launch()
-            self.driver.minimize_window()
+            time.sleep(3)
+            try:
+                self.driver.minimize_window()
+            except:
+                pass
 
             if session_data:
                 self.driver.get("https://rumble.com/404")
@@ -727,6 +747,7 @@ class RumbleRepostTracker(ctk.CTk):
                 bell = self.driver.find_element(By.CSS_SELECTOR, ".user-notifications--bell-button")
                 self.driver.execute_script("arguments[0].click();", bell)
                 time.sleep(1.5)
+
                 soup = BeautifulSoup(self.driver.page_source, 'html.parser')
                 notif_list = soup.find("ul", class_="user-notifications--list")
                 if notif_list:
@@ -792,17 +813,23 @@ class RumbleRepostTracker(ctk.CTk):
 
     def update_live_preview(self, *args):
         self.lbl_prev_header.configure(text=self.title_text_var.get())
+
         fam = self.font_family_var.get()
         if not fam: fam = "Roboto"
+
         title_size = int(GLOBAL_CONFIG.get('title_size', 24))
+
         self.lbl_prev_header.configure(font=(fam, title_size, "bold"))
         self.lbl_prev_user.configure(font=(fam, 32, "bold"))
         self.lbl_prev_video.configure(font=(fam, 18, "italic"))
+
         self.lbl_prev_header.configure(text_color=GLOBAL_CONFIG.get('title_color', '#ffffff'))
         self.lbl_prev_user.configure(text_color=GLOBAL_CONFIG.get('recent_color', '#85c742'))
         self.lbl_prev_video.configure(text_color=GLOBAL_CONFIG.get('older_color', '#ffffff'))
+
         align_map = {"left": "w", "center": "center", "right": "e"}
         alignment = align_map.get(self.title_align_var.get(), "center")
+
         self.lbl_prev_header.configure(anchor=alignment)
         self.lbl_prev_user.configure(anchor=alignment)
         self.lbl_prev_video.configure(anchor=alignment)
@@ -810,6 +837,8 @@ class RumbleRepostTracker(ctk.CTk):
     # --- NEW: LAUNCH WEB PREVIEW POPUP ---
     def launch_web_preview(self):
         url = "http://127.0.0.1:5050"
+
+        # 1. Attempt to find a binary to use
         binary = None
         if self.use_override_var.get():
             binary = self.custom_browser_path_var.get()
@@ -817,14 +846,19 @@ class RumbleRepostTracker(ctk.CTk):
             selection = self.selected_browser_var.get()
             if selection in self.browser_map:
                 binary = self.browser_map[selection]
+
+        # 2. Launch
         if binary and os.path.exists(binary):
             try:
+                # --app flags works on Chrome, Brave, Edge
                 subprocess.Popen([binary, f"--app={url}", "--window-size=600,250"])
             except Exception as e:
                 self.log(f"Error launching preview: {e}")
+                # Fallback to default browser (new tab)
                 import webbrowser
                 webbrowser.open(url)
         else:
+            # Fallback
             import webbrowser
             webbrowser.open(url)
 
@@ -1193,6 +1227,10 @@ class RumbleRepostTracker(ctk.CTk):
 
         self.txt_error_logs = ctk.CTkTextbox(tab_logs, height=300)
         self.txt_error_logs.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # INSERT VERSION HEADER
+        self.txt_error_logs.insert("0.0",
+                                   f"Rumble Repost Tracker {APP_VERSION} - Error Log\n========================================\n\n")
         self.txt_error_logs.configure(state="disabled")
 
         btn_frame = ctk.CTkFrame(tab_logs, fg_color="transparent")
