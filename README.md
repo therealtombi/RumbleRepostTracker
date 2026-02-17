@@ -1,10 +1,10 @@
-# Rumble Repost Tracker (Pro) v3.1 🤖
+# Rumble Repost Tracker (Pro) v3.2 🤖
 
 **Rumble Repost Tracker** is a professional tool for streamers that monitors your Rumble notifications in real-time. When someone reposts your video, it triggers a fully customizable, animated overlay (for OBS/Streamlabs) and plays an audio alert.
 
 ![App Screenshot](https://via.placeholder.com/800x450?text=Rumble+Repost+Tracker+v3.1)
 
-## 🚀 New in v3.1
+## 🚀 New in v3.2
 
 * **🛡️ Stealth Headless Mode:** The tracking browser now runs **completely invisible** in the background. It will not appear on your taskbar or screen, preventing accidental closures while you are streaming.
 * **🚀 Pop-out Web Preview:** A dedicated button to verify exactly how Google Fonts and CSS will render on the web/OBS before you go live.
